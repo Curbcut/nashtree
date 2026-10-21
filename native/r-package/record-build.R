@@ -9,7 +9,7 @@ flags <- setNames(lapply(keys, config), keys)
 # Preserve explicit compiler flags (for example macOS -arch arm64); reject
 # wrapper executables whose effective compiler is not identified here.
 command <- scan(text = flags$CXX17, what = character(), quiet = TRUE)
-if (!length(command) || !grepl("^(clang\\+\\+|g\\+\\+(-[0-9]+)?|c\\+\\+)$", basename(command[[1L]]))) stop("Unsupported compiler wrapper")
+if (!length(command) || !grepl("^(clang\\+\\+|((x86_64|aarch64)-linux-gnu-)?g\\+\\+(-[0-9]+)?|c\\+\\+)$", basename(command[[1L]]))) stop("Unsupported compiler wrapper")
 compiler <- Sys.which(command[[1L]])
 if (!nzchar(compiler)) stop("Cannot locate C++17 compiler")
 version <- system2(compiler, "--version", stdout = TRUE, stderr = TRUE)
