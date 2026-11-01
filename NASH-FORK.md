@@ -1,4 +1,10 @@
-# Temporary NASH dependency fork
+# NASH changes to the fork
+
+The record of each change nashtree makes to stochtree, oldest first. The fork
+started as a temporary pin; since the nashtree rename it is maintained long
+term (see README.md).
+
+## Sampler fixes
 
 This R-installable branch is generated with `Rscript cran-bootstrap.R 0 0 1`
 from the `codex/nash-fixes` source branch at commit
@@ -11,8 +17,6 @@ It combines these local bug fixes:
 - Fix NaN ordering in GFR feature presorting (7d364ad2).
 
 NASH pins the generated R-package commit in its DESCRIPTION Remotes field.
-After upstream includes all three fixes in a verified release, remove that
-Remotes entry and require the fixed upstream version in Imports.
 
 ## Numeric preprocessing follow-up
 
@@ -52,3 +56,13 @@ Preserves all earlier NASH fixes and forest-retention features.
 
 These are correctness fixes, not evidence of posterior convergence.
 Regression evidence is included in inst/nash-correctness.
+
+## nashtree identity and native forests (0.4.6.9010)
+
+`126a6320` renames the package, DLL and configure identity to `nashtree`, with
+no sampler, prediction or serialization change; seeded BART, random-intercept
+BART and BCF fits serialize identically to the stochtree-named package. The
+commits after it add the `nashtree_forest_v1` native core, its inference-only
+R bindings, the producer-neutral writer and build receipts. Evidence is in
+`native/RESULTS.md` and `native/evidence/`. nash pins `ff3eb820` for both
+training and its inference bindings.
