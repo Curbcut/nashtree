@@ -711,7 +711,7 @@ sampleBCFPosteriorPredictive <- function(
 #' @param rfx_group_ids A vector of group IDs for random effects model. Required if the BART model includes random effects.
 #' @param rfx_basis A matrix of bases for random effects model. Required if the BART model includes random effects.
 #' @param num_draws_per_sample The number of posterior predictive samples to draw for each posterior sample. Defaults to a heuristic based on the number of samples in a BART model (i.e. if the BART model has >1000 draws, we use 1 draw from the likelihood per sample, otherwise we upsample to ensure intervals are based on at least 1000 posterior predictive draws).
-#' @param offset (Optional) Count models only. Log-scale offset of length `nrow(X)`, as in [predict.bartmodel()]. For a count model, draws are `rnbinom(mu = exp(eta), size = r)` with `eta` the posterior linear predictor including the offset and `r` the matching dispersion draw.
+#' @param offset (Optional) Count models only. Log-scale offset of length `nrow(X)`, as in [predict.bartmodel()]. For a count model, draws are `rnbinom(mu = exp(eta), size = r)` with `eta` the posterior linear predictor including the offset and `r` the matching dispersion draw. For a zero-inflated count model each draw is then set to 0 with the matching posterior draw of the zero probability `pi`.
 #'
 #' @returns Array of posterior predictive samples with dimensions (num_observations, num_posterior_samples, num_draws_per_sample) if num_draws_per_sample > 1, otherwise (num_observations, num_posterior_samples).
 #'
@@ -888,6 +888,19 @@ sampleBARTPosteriorPredictive <- function(
       size = size_draws,
       mu = as.numeric(mu_draws)
     )
+    # Zero-inflated family: a structural zero with probability pi, drawn
+    # after the negative-binomial draws so that family = "negbin" is unchanged
+    if (identical(model_object$model_params$outcome_model$family, "zinb")) {
+      pi_draws <- predict(
+        model_object,
+        X = X,
+        type = "posterior",
+        terms = "zero_forest",
+        scale = "zero_probability"
+      )
+      structural <- runif(length(ppd_vector)) < as.numeric(pi_draws)
+      ppd_vector[structural] <- 0
+    }
     if (ppd_draw_multiplier > 1) {
       ppd_array <- array(
         ppd_vector,

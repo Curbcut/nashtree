@@ -139,3 +139,192 @@
   output[["negbin_dispersion_samples"]] <- dispersion
   list(model_params = model_params, output = output)
 }
+
+# ---------------------------------------------------------------------------
+# Zero-inflated negative binomial (family = "zinb")
+#
+# Model: with probability pi_i = Phi(eta0_i), eta0_i = c0 + g(x_i), y_i is a
+# structural zero; otherwise y_i ~ NB(mu_i, r) as above. With the structural-
+# zero indicator s_i as a latent variable, one Gibbs iteration of bart() is:
+#   1. s_i | y_i = 0, mu_i, pi_i, r ~ Bernoulli(pi_i / (pi_i + (1 - pi_i) NB(0 | mu_i, r)));
+#      s_i = 0 when y_i > 0 (.zinbSampleStructuralZeros()).
+#   2. The zero forest g on s by the Albert and Chib (1993) probit step.
+#   3. The count forest on the rows with s_i = 0 by the Polya-Gamma step above;
+#      rows with s_i = 1 carry an infinite variance weight, so 1 / w_i = 0 and
+#      they drop out of every sufficient statistic of the forest and of the
+#      random effects.
+#   4. r | y, mu over the rows with s_i = 0 (.negbinSampleDispersion()).
+# ---------------------------------------------------------------------------
+
+# log NB(0 | mean mu, size r) = -r log(1 + mu / r)
+.negbinLogZeroProb <- function(mu, r) {
+  -r * log1p(mu / r)
+}
+
+# Draw the structural-zero indicators. eta_count is log(mu) and eta_zero the
+# probit index of pi, both full linear predictors. The Bernoulli probability is
+# formed on the log-odds scale so that pi near 0 or 1 and large mu stay finite.
+.zinbSampleStructuralZeros <- function(y, eta_count, eta_zero, r) {
+  s <- integer(length(y))
+  zero <- which(y == 0)
+  if (length(zero) == 0) {
+    return(s)
+  }
+  log_odds <- pnorm(eta_zero[zero], log.p = TRUE) -
+    pnorm(eta_zero[zero], lower.tail = FALSE, log.p = TRUE) -
+    .negbinLogZeroProb(exp(eta_count[zero]), r)
+  s[zero] <- as.integer(runif(length(zero)) < plogis(log_odds))
+  s
+}
+
+# Constant-rate ZINB fit used to initialise the sampler: the excess-zero
+# fraction over the constant-rate NB fit (method of moments, as for "negbin")
+# starts a maximum-likelihood fit of (pi, log rate, r) with no covariates. The
+# NB fit alone understates the zero mass (the extra zeros inflate the variance,
+# so the moment estimate of r is too small and the NB zero probability too
+# large), which is why the three parameters are refined jointly. Returns the
+# zero probability, the log rate per unit exposure, the dispersion and the
+# posterior probability that each zero is structural under that fit.
+.zinbConstantFit <- function(y, offset) {
+  exposure <- exp(offset)
+  log_rate_nb <- log(sum(y) / sum(exposure))
+  m <- exp(offset + log_rate_nb)
+  r_nb <- .negbinDispersionInit(y, m)
+  p0_obs <- mean(y == 0)
+  p0_nb <- mean(exp(.negbinLogZeroProb(m, r_nb)))
+  excess <- if (p0_nb < 1) max((p0_obs - p0_nb) / (1 - p0_nb), 0) else 0
+  pi_start <- min(max(excess, 0.01), 0.9)
+  is_zero <- y == 0
+  y_pos <- y[!is_zero]
+  negloglik <- function(par) {
+    pi <- plogis(par[1])
+    r <- exp(par[3])
+    mu <- exp(offset + par[2])
+    log_p0 <- .negbinLogZeroProb(mu[is_zero], r)
+    # log(pi + (1 - pi) p0) via log-sum-exp
+    a <- log(pi)
+    b <- log1p(-pi) + log_p0
+    hi <- pmax(a, b)
+    ll_zero <- hi + log(exp(a - hi) + exp(b - hi))
+    mu_pos <- mu[!is_zero]
+    ll_pos <- log1p(-pi) + lgamma(y_pos + r) - lgamma(r) - lgamma(y_pos + 1) -
+      r * log1p(mu_pos / r) - y_pos * log1p(r / mu_pos)
+    value <- -(sum(ll_zero) + sum(ll_pos))
+    if (is.finite(value)) value else 1e300
+  }
+  start <- c(qlogis(pi_start), log_rate_nb - log1p(-pi_start), log(r_nb))
+  fit <- tryCatch(
+    optim(start, negloglik, method = "BFGS", control = list(maxit = 200)),
+    error = function(e) NULL
+  )
+  par <- if (!is.null(fit) && all(is.finite(fit$par))) fit$par else start
+  zero_probability <- plogis(par[1])
+  log_rate <- par[2]
+  dispersion <- min(max(exp(par[3]), 0.1), 1000)
+  log_p0 <- .negbinLogZeroProb(exp(offset + log_rate), dispersion)
+  structural_probability <- numeric(length(y))
+  structural_probability[is_zero] <- plogis(
+    qlogis(zero_probability) - log_p0[is_zero]
+  )
+  list(
+    zero_probability = zero_probability,
+    log_rate = log_rate,
+    dispersion = dispersion,
+    excess_zero_fraction = excess,
+    structural_probability = structural_probability
+  )
+}
+
+# JSON label of the zero forest: forests are written in the order mean,
+# variance, zero, and a count model never has a variance forest.
+.zeroForestJsonLabel <- function(include_mean_forest, include_variance_forest) {
+  paste0(
+    "forest_",
+    as.integer(include_mean_forest) + as.integer(include_variance_forest)
+  )
+}
+
+# Read the ZINB fields of a list of BART JSON objects (one per chain or model)
+# into model_params and output.
+.loadBartZinbFieldsFromJson <- function(json_object_list, model_params, output) {
+  json_default <- json_object_list[[1]]
+  model_params[["zero_outcome_mean"]] <- json_default$get_scalar("zero_outcome_mean")
+  model_params[["zinb_zero_probability_init"]] <- json_default$get_scalar(
+    "zinb_zero_probability_init"
+  )
+  model_params[["num_trees_zero"]] <- json_default$get_scalar("num_trees_zero")
+  model_params[["sample_sigma2_leaf_zero"]] <- json_default$get_boolean(
+    "sample_sigma2_leaf_zero"
+  )
+  model_params[["sigma2_leaf_zero_init"]] <- json_default$get_scalar(
+    "sigma2_leaf_zero_init"
+  )
+  if (isTRUE(model_params[["sample_sigma2_leaf_zero"]])) {
+    output[["sigma2_leaf_zero_samples"]] <- unlist(lapply(
+      json_object_list,
+      function(js) js$get_vector("sigma2_leaf_zero_samples", "parameters")
+    ))
+  }
+  list(model_params = model_params, output = output)
+}
+
+# Column indices of X_train a forest may split on, from keep / drop lists of
+# names or indices (keep takes precedence), as bart() does for its mean and
+# variance forests.
+.resolveForestVariableSubset <- function(X_train, keep_vars, drop_vars, keep_label, drop_label) {
+  p <- ncol(X_train)
+  resolve <- function(vars, label) {
+    if (is.character(vars)) {
+      if (!all(vars %in% names(X_train))) {
+        stop(label, " includes some variable names that are not in X_train")
+      }
+      return(unname(which(names(X_train) %in% vars)))
+    }
+    if (any(vars > p)) {
+      stop(label, " includes some variable indices that exceed the number of columns in X_train")
+    }
+    if (any(vars < 0)) {
+      stop(label, " includes some negative variable indices")
+    }
+    vars
+  }
+  if (!is.null(keep_vars)) {
+    return(resolve(keep_vars, keep_label))
+  }
+  if (!is.null(drop_vars)) {
+    drop <- resolve(drop_vars, drop_label)
+    return((1:p)[!(1:p %in% drop)])
+  }
+  1:p
+}
+
+# Albert and Chib (1993) latent draw: z_i ~ N(eta_i, 1) truncated to z_i > 0
+# when s_i = 1 and z_i <= 0 when s_i = 0, by inversion on the log scale so that
+# |eta_i| in the tens stays finite.
+.probitLatentDraw <- function(eta, s) {
+  u <- runif(length(eta))
+  e <- numeric(length(eta))
+  pos <- s == 1L
+  # s = 0: e = z - eta < -eta
+  e[!pos] <- qnorm(
+    log(u[!pos]) + pnorm(-eta[!pos], log.p = TRUE),
+    log.p = TRUE
+  )
+  # s = 1: e > -eta, i.e. -e < eta
+  e[pos] <- -qnorm(log(u[pos]) + pnorm(eta[pos], log.p = TRUE), log.p = TRUE)
+  eta + e
+}
+
+# Count family stored under outcome_model in a BART / BCF JSON object. Models
+# saved before the zero-inflated family existed carry no family field and are
+# plain negative-binomial models.
+.readOutcomeFamilyFromJson <- function(json_object, outcome) {
+  if (!identical(outcome, "count")) {
+    return(NULL)
+  }
+  if (json_contains_field_subfolder_cpp(json_object$json_ptr, "outcome_model", "family")) {
+    json_object$get_string("family", "outcome_model")
+  } else {
+    "negbin"
+  }
+}
