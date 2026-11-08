@@ -13,6 +13,7 @@
   type = "posterior",
   terms = "all",
   scale = "linear",
+  offset = NULL,
   ...
 )
 }
@@ -33,7 +34,9 @@ that were not in the training set.}
 
 \item{terms}{(Optional) Which model terms to include in the prediction. This can be a single term or a list of model terms. Options include "y_hat", "mean_forest", "rfx", "variance_forest", or "all". If a model doesn't have mean forest, random effects, or variance forest predictions, but one of those terms is request, the request will simply be ignored. If none of the requested terms are present in a model, this function will return \code{NULL} along with a warning. Default: "all".}
 
-\item{scale}{(Optional) Scale of mean function predictions. Options are "linear", which returns predictions on the original scale of the mean forest / RFX terms, "probability", which transforms predictions into class probabilities for models with discrete outcomes, and "class", which returns predicted outcome categories for discrete outcome models. "probability" is only valid for outcome models with \code{outcome == 'binary'} or \code{outcome == 'ordinal'}. For binary outcomes, this will return the probability that \code{y == 1}, and for ordinal outcomes, this will return probabilities for each outcome label. Default: "linear".}
+\item{scale}{(Optional) Scale of mean function predictions. Options are "linear", which returns predictions on the original scale of the mean forest / RFX terms, "probability", which transforms predictions into class probabilities for models with discrete outcomes, and "class", which returns predicted outcome categories for discrete outcome models. "probability" is only valid for outcome models with \code{outcome == 'binary'} or \code{outcome == 'ordinal'}. For binary outcomes, this will return the probability that \code{y == 1}, and for ordinal outcomes, this will return probabilities for each outcome label. For count (negative-binomial) models, "linear" returns the log rate \code{eta = offset + c + f(X) [+ rfx]}, "rate" returns \code{mu = exp(eta)}, and "response" is an alias of "rate"; on the "rate" scale the mean-forest term is \code{exp(c + f(X))} and the random-effects term is the multiplicative rate ratio \code{exp(rfx)}. "rate" and "response" are only valid for count models, and "probability" and "class" are not valid for them. With \code{type = "mean"}, transformed draws are averaged, so "rate" gives the posterior mean of \code{mu}. Default: "linear".}
+
+\item{offset}{(Optional) Count models only. Log-scale offset of length \code{nrow(X)} added to the linear predictor, as \code{offset_train} in \code{\link[=bart]{bart()}}. If the model was fit with an offset and none is given here, an offset of 0 (unit exposure) is used with a warning. Default: \code{NULL}.}
 
 \item{...}{(Optional) Other prediction parameters.}
 }

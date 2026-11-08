@@ -29,6 +29,7 @@ The following conventions are used for parameter names:
 \item In-sample variance forest predictions: \code{"sigma2_x_train"}, \code{"var_x_train"}
 \item Test set variance forest predictions: \code{"sigma2_x_test"}, \code{"var_x_test"}
 \item Ordinal model cutpoints (valid only for ordinal cloglog models): \code{"cloglog_cutpoints"}, \code{"cutpoints"}
+\item Negative-binomial size (dispersion) parameter \code{r} (valid only for count models): \code{"negbin_dispersion"}, \code{"dispersion"}
 }
 }
 \examples{

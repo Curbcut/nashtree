@@ -1,3 +1,39 @@
+# nashtree 0.4.6.9011
+
+* `bart()` fits count outcomes with a negative-binomial likelihood:
+  `general_params = list(outcome_model = OutcomeModel("count", "log"))` gives
+  `y ~ NB(mean mu, size r)` with `log(mu) = offset + c + f(X)` plus optional
+  random effects. Each iteration draws Pólya-Gamma variables
+  `omega ~ PG(y + r, log(mu) - log(r))`, which turn the likelihood into a
+  Gaussian regression with variance weights `1 / omega` and unit error
+  variance, so the existing forest and random-effects samplers run unchanged.
+  The dispersion `r` is drawn from its exact full conditional by slice
+  sampling on `log(r)` under a `Gamma(negbin_dispersion_prior_shape,
+  negbin_dispersion_prior_rate)` prior (defaults 1 and 0.01). New arguments
+  `offset_train` and `offset_test` take a log-scale offset (log exposure).
+  `predict()` gains `scale = "rate"` (and its alias `"response"`) and an
+  `offset` argument; `sampleBARTPosteriorPredictive()` draws negative-binomial
+  counts and also takes `offset`. Draws of `r` are returned as
+  `negbin_dispersion_samples`, serialized with the model, combined across
+  chains and JSON files, and available through
+  `extractParameter(model, "dispersion")`. The leaf scale defaults to the
+  Chipman, George and McCulloch (2010) calibration on the range of
+  `log1p(y)`. Variance forests and `sample_sigma2_global = TRUE` are refused
+  with a count outcome, and `bcf()` does not support it yet.
+
+* New internal Pólya-Gamma sampler (`src/include/stochtree/polya_gamma_sampler.h`),
+  written from Devroye (2009), Polson, Scott and Windle (2013) and Windle,
+  Polson and Scott (2014): exact for integer `b <= 50`, a 100-term gamma series
+  with an exact remainder mean below `b = 10,000`, and a moment-matched normal
+  above.
+
+* The random-effects sampler honours variance weights on a
+  `RandomEffectsDataset`: row `i` enters the group and working-parameter
+  conditionals with precision `1 / (sigma^2 * v_i)`. Datasets without weights
+  sample exactly as before; seeded Gaussian BART and BCF random-effects draws
+  are bitwise identical to 0.4.6.9010 (0ac0e7d0 and the nashtree rename
+  bd5c5c48 give the same draws).
+
 # stochtree 0.4.6.9010
 
 * Outcome summaries use read-only pointers, preserving shared ALTREP outcomes
