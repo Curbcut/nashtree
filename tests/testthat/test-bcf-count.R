@@ -48,6 +48,9 @@ small_bcf_count <- function(seed = 4, n = 300, family = "zinb") {
   d
 }
 
+# For family = "zinb" the zero part has no random effects here
+# (general_params$zero_random_effects = FALSE), as before they existed;
+# test-zinb-rfx.R covers them.
 fit_small_bcf_count <- function(d, family = "zinb", seed = 1, num_chains = 1,
                                 num_gfr = 4, general = list(), ...) {
   bcf(d$X, d$Z, d$y, propensity_train = d$propensity, offset_train = d$offset,
@@ -57,7 +60,7 @@ fit_small_bcf_count <- function(d, family = "zinb", seed = 1, num_chains = 1,
     random_effects_params = list(model_spec = "intercept_only"),
     num_gfr = num_gfr, num_burnin = 5, num_mcmc = 10,
     general_params = c(list(outcome_model = count_model(family), random_seed = seed,
-      num_chains = num_chains), general),
+      num_chains = num_chains, zero_random_effects = FALSE), general),
     prognostic_forest_params = list(num_trees = 40),
     treatment_effect_forest_params = list(num_trees = 20),
     ...)
