@@ -6,6 +6,7 @@
 #include <stochtree/meta.h>
 #include <stochtree/ordinal_sampler.h>
 #include <stochtree/partition_tracker.h>
+#include <stochtree/polya_gamma_sampler.h>
 #include <stochtree/tree_sampler.h>
 #include <stochtree/variance_model.h>
 #include <memory>
@@ -369,4 +370,28 @@ void ordinal_sampler_update_cumsum_exp_cpp(
     cpp11::external_pointer<StochTree::ForestDataset> data_ptr
 ) {
     sampler_ptr->UpdateCumulativeExpSums(*data_ptr);
+}
+
+[[cpp11::register]]
+cpp11::writable::doubles sample_polya_gamma_cpp(cpp11::doubles b, cpp11::doubles z,
+                                                cpp11::external_pointer<std::mt19937> rng) {
+    // Vectorised PG(b, z) draws; a length-one b or z is recycled
+    R_xlen_t n_b = b.size();
+    R_xlen_t n_z = z.size();
+    if (n_b == 0 || n_z == 0) return cpp11::writable::doubles(static_cast<R_xlen_t>(0));
+    if (n_b != n_z && n_b != 1 && n_z != 1) {
+        cpp11::stop("b and z must have the same length, or one of them must have length 1");
+    }
+    R_xlen_t n = std::max(n_b, n_z);
+    cpp11::writable::doubles output(n);
+    StochTree::PolyaGammaSampler sampler;
+    for (R_xlen_t i = 0; i < n; i++) {
+        double b_i = b[n_b == 1 ? 0 : i];
+        double z_i = z[n_z == 1 ? 0 : i];
+        if (!std::isfinite(b_i) || !std::isfinite(z_i) || b_i < 0.0) {
+            cpp11::stop("sample_polya_gamma_cpp: b must be finite and non-negative and z finite (element %d)", static_cast<int>(i + 1));
+        }
+        output[i] = sampler.Sample(b_i, z_i, *rng);
+    }
+    return output;
 }

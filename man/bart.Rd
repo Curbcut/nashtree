@@ -25,7 +25,10 @@ bart(
   variance_forest_params = list(),
   random_effects_params = list(),
   forest_retention = c("all", "importance"),
-  retained_sample_ids = NULL
+  retained_sample_ids = NULL,
+  offset_train = NULL,
+  offset_test = NULL,
+  zero_forest_params = list()
 )
 }
 \arguments{
@@ -93,7 +96,11 @@ referred to internally in the C++ layer as "variance weights" (\code{var_weights
 \item \code{keep_every} How many iterations of the burned-in MCMC sampler should be run before forests and parameters are retained. Default \code{1}. Setting \code{keep_every <- k} for some \code{k > 1} will "thin" the MCMC samples by retaining every \code{k}-th sample, rather than simply every sample. This can reduce the autocorrelation of the MCMC samples.
 \item \code{num_chains} How many independent MCMC chains should be sampled. If \code{num_mcmc = 0}, this is ignored. If \code{num_gfr = 0}, then each chain is run from root for \code{num_mcmc * keep_every + num_burnin} iterations, with \code{num_mcmc} samples retained. If \code{num_gfr > 0}, each MCMC chain will be initialized from a separate GFR ensemble, with the requirement that \code{num_gfr >= num_chains}. Default: \code{1}. Note that if \code{num_chains > 1}, the returned model object will contain samples from all chains, stored consecutively. That is, if there are 4 chains with 100 samples each, the first 100 samples will be from chain 1, the next 100 samples will be from chain 2, etc... For more detail on working with multi-chain BART models, see \href{https://stochtree.ai/vignettes/multi-chain.html}{the multi chain vignette}.
 \item \code{verbose} Whether or not to print progress during the sampling loops. Default: \code{FALSE}.
-\item \code{outcome_model} A structured \code{OutcomeModel} object that specifies the outcome type and desired link function. This argument pre-empts the legacy (deprecated) \code{probit_outcome_model} option. Default: \code{OutcomeModel(outcome='continuous', link='identity')}.
+\item \code{outcome_model} A structured \code{OutcomeModel} object that specifies the outcome type and desired link function. This argument pre-empts the legacy (deprecated) \code{probit_outcome_model} option. Default: \code{OutcomeModel(outcome='continuous', link='identity')}. \code{OutcomeModel(outcome = 'count', link = 'log')} fits a negative-binomial model, see "Count outcomes" below.
+\item \code{negbin_dispersion_prior_shape} Count outcomes only. Shape \code{a0} of the \code{Gamma(a0, b0)} (shape, rate) prior on the negative-binomial size (dispersion) parameter \code{r}. Default: \code{1}.
+\item \code{negbin_dispersion_prior_rate} Count outcomes only. Rate \code{b0} of the same prior. Default: \code{0.01}, so the default prior is exponential with mean 100 and allows near-Poisson data.
+\item \code{negbin_dispersion_init} Count outcomes only. Starting value of \code{r}. Defaults to a method-of-moments estimate around the constant-rate fit, clamped to \verb{[0.1, 1000]}.
+\item \code{sample_negbin_dispersion} Count outcomes only. Whether to sample \code{r}. If \code{FALSE}, \code{r} stays at \code{negbin_dispersion_init}. Default: \code{TRUE}.
 \item \code{probit_outcome_model} Deprecated in favor of \code{outcome_model}. Whether or not the outcome should be modeled as explicitly binary via a probit link. If \code{TRUE}, \code{y} must only contain the values \code{0} and \code{1}. Default: \code{FALSE}.
 \item \code{num_threads} Number of threads to use in the GFR and MCMC algorithms, as well as prediction. Defaults to \code{1} (single-threaded). Set to \code{-1} to use the maximum number of available threads, or a positive integer for a specific count. OpenMP must be available for values other than \code{1}.
 }}
@@ -167,6 +174,26 @@ variance forests or previous-model initialization are supported. Random
 effects are supported: the retained samples of the random effects container
 are kept alongside the selected forests. Cannot be combined with importance
 retention. Default \code{NULL} keeps existing behavior.}
+
+\item{offset_train}{(Optional) Count outcomes only. Numeric vector of length \code{nrow(X_train)} added to the
+linear predictor on the log scale, \code{log(mu_i) = offset_train[i] + f(X_i)}, typically the log of an
+exposure such as population or time at risk. Default: \code{NULL} (no offset).}
+
+\item{offset_test}{(Optional) Count outcomes only. Offset for \code{X_test}, of length \code{nrow(X_test)}. If
+\code{offset_train} is supplied and \code{offset_test} is not, test-set predictions use an offset of 0 (unit
+exposure) and a warning is raised.}
+
+\item{zero_forest_params}{(Optional) Zero-inflated count outcomes only (\code{OutcomeModel("count", "log", family = "zinb")}). A list of zero-forest parameters, each with a default:
+\itemize{
+\item \code{num_trees} Number of trees in the probit zero forest. Default: \code{50}.
+\item \code{alpha}, \code{beta}, \code{min_samples_leaf}, \code{max_depth} Tree prior and size limits, as for the mean forest. Defaults: \code{0.95}, \code{2}, \code{5}, \code{10}.
+\item \code{sample_sigma2_leaf} Whether to sample the zero-forest leaf scale. Default: \code{FALSE} (fixed at the probit calibration, as in Chipman, George and McCulloch 2010).
+\item \code{sigma2_leaf_init} Zero-forest leaf scale. Default: \code{2 / num_trees}.
+\item \code{sigma2_leaf_shape}, \code{sigma2_leaf_scale} Inverse-gamma prior of the leaf scale when it is sampled. Defaults: \code{3} and \code{1 / num_trees}.
+\item \code{keep_vars}, \code{drop_vars}, \code{num_features_subsample} Variable selection for the zero forest, as for the mean forest.
+}
+
+Supplying \code{zero_forest_params} for any other outcome model is an error.}
 }
 \value{
 List of sampling outputs and a wrapper around the sampled forests (which can be used for in-memory prediction on new data, or serialized to JSON on disk).
@@ -174,6 +201,67 @@ List of sampling outputs and a wrapper around the sampled forests (which can be 
 \description{
 Run the BART algorithm for supervised learning.
 }
+\section{Count outcomes}{
+
+With \code{general_params = list(outcome_model = OutcomeModel("count", "log"))}, \code{y_train} must hold
+non-negative integers and the model is
+\verb{y_i ~ NB(mean mu_i, size r)}, \verb{log(mu_i) = offset_i + c + f(X_i) [+ random effects]},
+so that \code{Var(y_i) = mu_i + mu_i^2 / r}. \code{c = log(sum(y) / sum(exp(offset)))} is a fixed centering
+constant (stored as \code{model_params$outcome_mean}) and \code{f} is the mean forest. Each iteration draws
+Pólya-Gamma variables \code{omega_i ~ PG(y_i + r, log(mu_i) - log(r))} (Polson, Scott and Windle 2013), which turn
+the likelihood into a Gaussian regression of \verb{(y_i - r) / (2 omega_i)} with variance \code{1 / omega_i}; the
+forest and random effects are then sampled by the usual Gaussian samplers with variance weights
+\code{1 / omega_i} and the global error variance fixed at 1. \code{r} is drawn from its full conditional given
+the current means by slice sampling on \code{log(r)}. A variance forest cannot be combined with a count
+outcome, and \code{sample_sigma2_global = TRUE} is refused. \code{observation_weights}, if supplied, multiply the
+per-iteration variance weights.
+
+Unless \code{sigma2_leaf_init} is set, the mean-forest leaf scale is calibrated on the log scale as in
+Chipman, George and McCulloch (2010): \verb{sigma2_leaf_init = (R / (2 k sqrt(num_trees)))^2} with
+\code{k = 2} and \code{R} the range of \code{log1p(y_train)}.
+
+\code{y_hat_train} and \code{y_hat_test} hold draws of the linear predictor \code{log(mu)} including the offset, and
+the draws of \code{r} are returned as \code{negbin_dispersion_samples}. Use \code{predict(..., scale = "rate")} for
+\code{mu} and \code{\link[=sampleBARTPosteriorPredictive]{sampleBARTPosteriorPredictive()}} for counts.
+}
+
+\section{Zero-inflated count outcomes}{
+
+With \code{OutcomeModel("count", "log", family = "zinb")} the model is a zero-inflated negative binomial:
+with probability \code{pi_i = Phi(c0 + g(X_i))} the observation is a structural zero, and otherwise
+\code{y_i ~ NB(mu_i, r)} with \code{mu_i} as above. \code{g} is a second forest (the "zero forest", configured
+through \code{zero_forest_params}) and \code{c0} a fixed centering constant (\code{model_params$zero_outcome_mean}).
+With the structural-zero indicator \code{s_i} as a latent variable, each iteration
+(1) draws \verb{s_i ~ Bernoulli(pi_i / (pi_i + (1 - pi_i) NB(0 | mu_i, r)))} for \code{y_i = 0} (and sets
+\code{s_i = 0} for \code{y_i > 0}); (2) samples the zero forest on \code{s} by the probit (Albert and Chib 1993)
+latent-variable step, with its own forest, tracker and model configuration; (3) samples the count
+forest by the Pólya-Gamma step on the rows with \code{s_i = 0} only: rows with \code{s_i = 1} carry an infinite
+variance weight, so \code{1 / w_i = 0} and they add nothing to the leaf sufficient statistics, to the
+leaf marginal likelihoods or to the random-effects conditional; a leaf that holds only such rows
+has a finite marginal likelihood equal to its prior and its value is drawn from the leaf prior;
+(4) draws \code{r} from its conditional over the rows with \code{s_i = 0}; and (5) samples random effects, which
+enter the count part only (the zero part has no random effects).
+
+\code{min_samples_leaf} of the count forest counts all rows of a leaf, structural zeros included, so a
+count-forest leaf may hold fewer than \code{min_samples_leaf} rows that inform it. The bound is a guard
+against very small leaves, not a likelihood quantity, and this keeps the tree prior independent of
+the latent \code{s}; the leaf prior still regularizes a leaf with few informative rows.
+
+The sampler is initialised from a constant-rate ZINB fit: the excess-zero fraction over the
+constant-rate negative-binomial fit (method of moments) starts a maximum-likelihood fit of
+\verb{(pi, c, r)} without covariates; \code{c} centres the count forest, \code{qnorm(pi)} (clamped to
+\verb{[0.01, 0.99]}) centres the zero forest and \code{r} is the default \code{negbin_dispersion_init}. The first
+draw of \code{s} is made from the root forests and is therefore the posterior of \code{s} under that constant
+fit. The zero-forest leaf scale follows the probit calibration of Chipman, George and McCulloch (2010),
+\code{sigma2_leaf_init = 2 / num_trees}, and is held fixed unless \code{zero_forest_params$sample_sigma2_leaf = TRUE}.
+\code{observation_weights} are not supported with this family.
+
+The output adds \code{zero_forests}, \code{zero_hat_train} and \code{zero_hat_test} (draws of the probit index
+\code{c0 + g(X)}, so \code{pnorm(zero_hat_train)} are draws of \code{pi}). \code{predict()} offers the scales \code{"linear"}
+(\code{log(mu)}), \code{"rate"} (\code{mu}), \code{"zero_probability"} (\code{pi}) and \code{"response"} (\verb{(1 - pi) mu}, the mean
+of \code{y}), and the term \code{"zero_forest"}. \code{\link[=sampleBARTPosteriorPredictive]{sampleBARTPosteriorPredictive()}} includes the zero mass.
+}
+
 \examples{
 n <- 100
 p <- 5

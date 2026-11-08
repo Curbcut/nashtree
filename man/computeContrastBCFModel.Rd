@@ -17,7 +17,9 @@ computeContrastBCFModel(
   rfx_basis_0 = NULL,
   rfx_basis_1 = NULL,
   type = "posterior",
-  scale = "linear"
+  scale = "linear",
+  offset_0 = NULL,
+  offset_1 = NULL
 )
 }
 \arguments{
@@ -49,7 +51,12 @@ for group labels that were not in the training set. Must be a vector.}
 
 \item{type}{(Optional) Aggregation level of the contrast. Options are "mean", which averages the contrast evaluations over every draw of a BCF model, and "posterior", which returns the entire matrix of posterior contrast estimates. Default: "posterior".}
 
-\item{scale}{(Optional) Scale of the contrast. Options are "linear", which returns a contrast on the original scale of the mean forest / RFX terms, and "probability", which transforms each contrast term into a probability of observing \code{y == 1} before taking their difference. "probability" is only valid for models fit with a probit outcome model. Default: "linear".}
+\item{scale}{(Optional) Scale of the contrast. Options are "linear", which returns a contrast on the original scale of the mean forest / RFX terms, and "probability", which transforms each contrast term into a probability of observing \code{y == 1} before taking their difference. "probability" is only valid for models fit with a probit outcome model. Default: "linear".
+For count models the scales are "linear" (contrast of \code{log(mu)}, a log rate ratio when only the treatment differs), "rate" (\code{mu}), "response" (\verb{(1 - pi) mu}, equal to "rate" for \code{family = "negbin"}) and "zero_probability" (\code{pi}, zero-inflated models).}
+
+\item{offset_0}{(Optional) Count models only. Log-scale offset for the control arm rows.}
+
+\item{offset_1}{(Optional) Count models only. Log-scale offset for the treatment arm rows.}
 }
 \value{
 List of prediction matrices or single prediction matrix / vector, depending on the terms requested.

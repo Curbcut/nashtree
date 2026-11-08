@@ -4,12 +4,19 @@
 \alias{OutcomeModel}
 \title{Create a New Outcome Model Object}
 \usage{
-OutcomeModel(outcome = "continuous", link = NULL)
+OutcomeModel(outcome = "continuous", link = NULL, family = NULL)
 }
 \arguments{
-\item{outcome}{Character string specifying the outcome type.}
+\item{outcome}{Character string specifying the outcome type: \code{"continuous"},
+\code{"binary"}, \code{"ordinal"} or \code{"count"}.}
 
-\item{link}{Character string specifying the link function.}
+\item{link}{Character string specifying the link function: \code{"identity"}
+(continuous), \code{"probit"} or \code{"cloglog"} (binary), \code{"cloglog"} (ordinal), or
+\code{"log"} (count). If \code{NULL}, the first listed link for the outcome type is used.}
+
+\item{family}{Count outcomes only. \code{"negbin"} (the default for a count
+outcome) for a negative-binomial model, or \code{"zinb"} for a zero-inflated
+negative-binomial model. Must be \code{NULL} for the other outcome types.}
 }
 \value{
 An object of class \code{outcome_model}.
@@ -17,6 +24,17 @@ An object of class \code{outcome_model}.
 \description{
 Create a New Outcome Model Object
 }
+\details{
+\code{OutcomeModel(outcome = "count", link = "log")} selects the
+negative-binomial outcome of \code{\link[=bart]{bart()}}: \verb{y ~ NB(mean mu, size r)} with
+\code{log(mu) = offset + f(X)} (plus random effects), fitted by Pólya-Gamma
+augmentation. \code{OutcomeModel("count", "log", family = "zinb")} adds a
+probit zero part: with probability \code{pi = Phi(g(X))} the observation is a
+structural zero, otherwise it is drawn from the negative binomial. See the
+"Count outcomes" sections of \code{\link[=bart]{bart()}} and \code{\link[=bcf]{bcf()}}.
+}
 \examples{
 my_model <- OutcomeModel(outcome = "continuous", link = "identity")
+count_model <- OutcomeModel(outcome = "count", link = "log")
+zinb_model <- OutcomeModel(outcome = "count", link = "log", family = "zinb")
 }

@@ -26,7 +26,11 @@ bcf(
   prognostic_forest_params = list(),
   treatment_effect_forest_params = list(),
   variance_forest_params = list(),
-  random_effects_params = list()
+  random_effects_params = list(),
+  offset_train = NULL,
+  offset_test = NULL,
+  zero_prognostic_forest_params = list(),
+  zero_treatment_effect_forest_params = list()
 )
 }
 \arguments{
@@ -107,7 +111,8 @@ Default: \code{NULL}.}
 \item \code{verbose} Whether or not to print progress during the sampling loops. Default: \code{FALSE}.
 \item \code{outcome_model} A structured \code{OutcomeModel} object that specifies the outcome type and desired link function. This argument pre-empts the legacy (deprecated) \code{probit_outcome_model} option. Default: \code{OutcomeModel(outcome='continuous', link='identity')}.
 \item \code{probit_outcome_model} Deprecated in favor of \code{outcome_model}. Whether or not the outcome should be modeled as explicitly binary via a probit link. If \code{TRUE}, \code{y} must only contain the values \code{0} and \code{1}. Default: \code{FALSE}.
-\item \code{num_threads} Number of threads to use in the GFR and MCMC algorithms, as well as prediction. If OpenMP is not available on a user's setup, this will default to \code{1}, otherwise to the maximum number of available threads.
+\item \code{num_threads} Number of threads to use in the GFR and MCMC algorithms, as well as prediction. Defaults to \code{1} (single-threaded). Set to \code{-1} to use the maximum number of available threads, or a positive integer for a specific count. OpenMP must be available for values other than \code{1}.
+\item \code{negbin_dispersion_prior_shape}, \code{negbin_dispersion_prior_rate}, \code{negbin_dispersion_init}, \code{sample_negbin_dispersion} Count outcomes only: the \code{Gamma(shape, rate)} prior on the negative-binomial size \code{r} (defaults \code{1} and \code{0.01}), its starting value (method of moments, or the constant-rate ZINB fit, if \code{NULL}) and whether to sample it (default \code{TRUE}), as in \code{\link[=bart]{bart()}}.
 }}
 
 \item{prognostic_forest_params}{(Optional) A list of prognostic forest model parameters, each of which has a default value processed internally, so this argument list is optional.
@@ -144,7 +149,8 @@ Default: \code{NULL}.}
 \item \code{drop_vars} Vector of variable names or column indices denoting variables that should be excluded from the forest. Default: \code{NULL}. If both \code{drop_vars} and \code{keep_vars} are set, \code{drop_vars} will be ignored.
 \item \code{num_features_subsample} How many features to subsample when growing each tree for the GFR algorithm. Defaults to the number of features in the training dataset.
 \item \code{sample_intercept} Whether to sample a global treatment effect intercept \code{tau_0} so the full CATE is \code{tau_0 + tau(X)}. Default: \code{TRUE}. Compatible with \code{adaptive_coding = TRUE}, in which case the recoded treatment basis is used.
-\item \code{tau_0_prior_var} Variance of the normal prior on \code{tau_0} (a scalar applied to each treatment dimension independently). Auto-calibrated to outcome variance when \code{NULL} and outcome is continuous. Only used when \code{sample_intercept = TRUE}.
+\item \code{tau_0_prior_var} Variance of the normal prior on \code{tau_0} (a scalar applied to each treatment dimension independently). Auto-calibrated to outcome variance when \code{NULL} and outcome is continuous; \code{1} (on the log-rate-ratio scale) for count outcomes. Only used when \code{sample_intercept = TRUE}.
+\item \code{log_rate_ratio_prior_sd} Count outcomes only. Prior standard deviation of the treatment forest \code{tau(X)}, the log rate ratio, summed over trees: \code{sigma2_leaf_init} defaults to \code{log_rate_ratio_prior_sd^2 / num_trees}. Default: \code{0.5}, so one prior standard deviation is a rate ratio between \code{exp(-0.5) = 0.61} and \code{exp(0.5) = 1.65}.
 }}
 
 \item{variance_forest_params}{(Optional) A list of variance forest model parameters, each of which has a default value processed internally, so this argument list is optional.
@@ -173,6 +179,14 @@ Default: \code{NULL}.}
 \item \code{variance_prior_shape} Shape parameter for the inverse gamma prior on the variance of the random effects "group parameter." Default: \code{1}.
 \item \code{variance_prior_scale} Scale parameter for the inverse gamma prior on the variance of the random effects "group parameter." Default: \code{1}.
 }}
+
+\item{offset_train}{(Optional) Count outcomes only. Log-scale offset of length \code{nrow(X_train)} (log exposure), added to the count part's linear predictor. Default: \code{NULL} (no offset).}
+
+\item{offset_test}{(Optional) Count outcomes only. Offset for \code{X_test}. If \code{offset_train} is supplied and \code{offset_test} is not, test-set predictions use an offset of 0 with a warning.}
+
+\item{zero_prognostic_forest_params}{(Optional) Zero-inflated count outcomes only. Parameters of the probit zero-part prognostic forest: \code{num_trees} (default \code{50}), \code{alpha} (\code{0.95}), \code{beta} (\code{2}), \code{min_samples_leaf} (\code{5}), \code{max_depth} (\code{10}) and \code{sigma2_leaf_init} (default \code{2 / num_trees}, held fixed). The forest uses the variable weights (including the propensity column) of the count prognostic forest.}
+
+\item{zero_treatment_effect_forest_params}{(Optional) Zero-inflated count outcomes only. Parameters of the probit zero-part treatment forest, whose basis is the raw treatment: \code{num_trees} (default \code{25}), \code{alpha} (\code{0.25}), \code{beta} (\code{3}), \code{min_samples_leaf} (\code{5}), \code{max_depth} (\code{5}), \code{delta_max} (\code{0.5}) and \code{sigma2_leaf_init} (default \verb{(delta_max / (qnorm(0.84135) dnorm(0)))^2 / num_trees}, the probit BCF calibration, held fixed). It uses the variable weights of the count treatment forest.}
 }
 \value{
 List of sampling outputs and a wrapper around the sampled forests (which can be used for in-memory prediction on new data, or serialized to JSON on disk).
@@ -180,6 +194,36 @@ List of sampling outputs and a wrapper around the sampled forests (which can be 
 \description{
 Run the Bayesian Causal Forest (BCF) algorithm for regularized causal effect estimation.
 }
+\section{Count outcomes}{
+
+\code{general_params = list(outcome_model = OutcomeModel("count", "log"))} fits
+\code{y_i ~ NB(mu_i, r)} with
+\verb{log(mu_i) = offset_i + c + mu(X_i, pi_hat_i) + [tau_0 + tau(X_i)] b(Z_i) [+ random effects]},
+where \code{b(Z)} is the treatment basis (\code{Z}, or the adaptive coding \verb{b_0 (1 - Z) + b_1 Z}), so \code{tau_0 + tau(X)}
+is a log rate ratio (per unit of dose for a continuous treatment) and \code{c} a fixed centering constant
+(\code{model_params$outcome_mean}). Each iteration draws Pólya-Gamma variables as in \code{\link[=bart]{bart()}}, which turns the
+likelihood into the weighted Gaussian regression \code{bcf()} already fits: the prognostic forest, the
+treatment forest (binary or continuous dose), \code{tau_0}, the adaptive coding, the propensity covariate,
+random effects, GFR and multiple chains run on the pseudo-outcome with variance weights \code{1 / omega_i}
+and the error variance fixed at 1; \code{tau_0} and the coding parameters, which are sampled in R, use the
+precision weights \code{omega_i}. \code{r} is drawn by slice sampling as in \code{\link[=bart]{bart()}}. A variance forest and
+\code{sample_sigma2_global = TRUE} are refused. The prognostic leaf scale is calibrated on the log scale as in
+\code{\link[=bart]{bart()}}, the treatment forest's through \code{log_rate_ratio_prior_sd}, and \code{tau_0} has a \code{N(0, 1)} prior by default.
+
+With \code{family = "zinb"} a zero part is added: \verb{pi_i = Phi(c0 + mu_z(X_i, pi_hat_i) + tau_z(X_i) Z_i)} is the
+probability of a structural zero, with a probit prognostic forest \code{mu_z} and a probit treatment forest
+\code{tau_z} (four forests in all), sampled on the structural-zero indicators as in \code{\link[=bart]{bart()}}; structural zeros
+drop out of the count part through infinite variance weights. The zero part has no random effects, no
+intercept \code{tau_0} and no adaptive coding, and a multivariate treatment is refused. \code{observation_weights} are
+refused with this family (with \code{family = "negbin"} they multiply the variance weights).
+
+\code{y_hat_train} holds draws of \code{log(mu)} including the offset, \code{mu_hat_train} of \code{c + mu(X)}, \code{tau_hat_train} of
+the log rate ratio. The zero-inflated family adds \code{zero_mu_hat_train} (\code{c0 + mu_z(X)}), \code{zero_tau_hat_train}
+(\code{tau_z(X)}, probit scale) and \code{zero_hat_train} (the full probit index), and their test-set versions.
+\code{\link[=predict.bcfmodel]{predict.bcfmodel()}} offers the scales \code{"linear"}, \code{"rate"}, \code{"response"} (\verb{(1 - pi) mu}) and \code{"zero_probability"},
+\code{\link[=computeContrastBCFModel]{computeContrastBCFModel()}} contrasts on those scales, and \code{\link[=sampleBCFPosteriorPredictive]{sampleBCFPosteriorPredictive()}} draws counts.
+}
+
 \examples{
 n <- 500
 p <- 5

@@ -1,3 +1,77 @@
+# nashtree 0.4.6.9011
+
+* `bcf()` fits count outcomes: `OutcomeModel("count", "log")` (negative
+  binomial) and `OutcomeModel("count", "log", family = "zinb")`. The count part
+  is `log(mu) = offset + c + mu(X, pi_hat) + [tau_0 + tau(X)] b(Z) [+ rfx]`, so
+  the treatment effect is a log rate ratio; the Pólya-Gamma step turns each
+  iteration into the weighted Gaussian regression `bcf()` already fits, and the
+  prognostic and treatment forests (binary or continuous dose), the propensity
+  covariate, adaptive coding, `tau_0`, random effects, GFR and multiple chains
+  run on it. `tau_0` and the adaptive-coding parameters use the Pólya-Gamma
+  precision weights. The treatment-forest prior is set on the log-rate-ratio
+  scale by the new `treatment_effect_forest_params$log_rate_ratio_prior_sd`
+  (default 0.5), and `tau_0` has a `N(0, 1)` prior by default. The zero-inflated
+  family adds probit zero-part prognostic and treatment forests
+  (`zero_prognostic_forest_params`, `zero_treatment_effect_forest_params`). New
+  arguments `offset_train` / `offset_test`; `predict.bcfmodel()` gains the
+  `"rate"`, `"response"` and `"zero_probability"` scales, the `"zero_prognostic"`,
+  `"zero_tau"` and `"zero_forest"` terms and an `offset`;
+  `computeContrastBCFModel()` takes `offset_0` / `offset_1` and the count scales;
+  `sampleBCFPosteriorPredictive()` draws counts. Variance forests and
+  `sample_sigma2_global = TRUE` are refused with counts. Gaussian and probit
+  `bcf()` draws are bitwise unchanged.
+
+* `bart()` fits zero-inflated negative-binomial outcomes with
+  `OutcomeModel("count", "log", family = "zinb")` (`family = "negbin"` stays the
+  default and samples exactly as before). With probability
+  `pi = Phi(c0 + g(X))` an observation is a structural zero, otherwise it
+  follows the negative-binomial count part. Each iteration draws the
+  structural-zero indicators, samples a probit zero forest `g` on them
+  (configured by the new `zero_forest_params`, default 50 trees with the leaf
+  scale fixed at `2 / num_trees`) and runs the Pólya-Gamma count step on the
+  non-structural rows only: structural zeros get an infinite variance weight and
+  drop out of the leaf and random-effects sufficient statistics. `r` is updated
+  over the non-structural rows; random effects enter the count part. `predict()`
+  gains `scale = "zero_probability"` (`pi`), `scale = "response"` becomes
+  `(1 - pi) mu` for this family, and the term `"zero_forest"` returns the zero
+  part; `sampleBARTPosteriorPredictive()` includes the zero mass. Draws of the
+  probit index are returned as `zero_hat_train` / `zero_hat_test`, and the zero
+  forest and family are serialized with the model.
+
+* `bart()` fits count outcomes with a negative-binomial likelihood:
+  `general_params = list(outcome_model = OutcomeModel("count", "log"))` gives
+  `y ~ NB(mean mu, size r)` with `log(mu) = offset + c + f(X)` plus optional
+  random effects. Each iteration draws Pólya-Gamma variables
+  `omega ~ PG(y + r, log(mu) - log(r))`, which turn the likelihood into a
+  Gaussian regression with variance weights `1 / omega` and unit error
+  variance, so the existing forest and random-effects samplers run unchanged.
+  The dispersion `r` is drawn from its exact full conditional by slice
+  sampling on `log(r)` under a `Gamma(negbin_dispersion_prior_shape,
+  negbin_dispersion_prior_rate)` prior (defaults 1 and 0.01). New arguments
+  `offset_train` and `offset_test` take a log-scale offset (log exposure).
+  `predict()` gains `scale = "rate"` (and its alias `"response"`) and an
+  `offset` argument; `sampleBARTPosteriorPredictive()` draws negative-binomial
+  counts and also takes `offset`. Draws of `r` are returned as
+  `negbin_dispersion_samples`, serialized with the model, combined across
+  chains and JSON files, and available through
+  `extractParameter(model, "dispersion")`. The leaf scale defaults to the
+  Chipman, George and McCulloch (2010) calibration on the range of
+  `log1p(y)`. Variance forests and `sample_sigma2_global = TRUE` are refused
+  with a count outcome.
+
+* New internal Pólya-Gamma sampler (`src/include/stochtree/polya_gamma_sampler.h`),
+  written from Devroye (2009), Polson, Scott and Windle (2013) and Windle,
+  Polson and Scott (2014): exact for integer `b <= 50`, a 100-term gamma series
+  with an exact remainder mean below `b = 10,000`, and a moment-matched normal
+  above.
+
+* The random-effects sampler honours variance weights on a
+  `RandomEffectsDataset`: row `i` enters the group and working-parameter
+  conditionals with precision `1 / (sigma^2 * v_i)`. Datasets without weights
+  sample exactly as before; seeded Gaussian BART and BCF random-effects draws
+  are bitwise identical to 0.4.6.9010 (0ac0e7d0 and the nashtree rename
+  bd5c5c48 give the same draws).
+
 # stochtree 0.4.6.9010
 
 * Outcome summaries use read-only pointers, preserving shared ALTREP outcomes

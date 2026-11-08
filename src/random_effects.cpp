@@ -153,13 +153,24 @@ Eigen::VectorXd MultivariateRegressionRandomEffectsModel::WorkingParameterMean(R
   Eigen::MatrixXd X = dataset.GetBasis();
   Eigen::VectorXd y = residual.GetData();
   Eigen::MatrixXd xi = group_parameters_;
+  const bool has_weights = dataset.HasVarWeights();
+  Eigen::VectorXd precision_weights;
+  Eigen::VectorXd w_group;
+  if (has_weights) precision_weights = dataset.GetVarWeights().cwiseInverse();
   for (int i = 0; i < num_groups; i++) {
     observation_indices = rfx_tracker.NodeIndicesInternalIndex(i);
     X_group = X(observation_indices, Eigen::all);
     y_group = y(observation_indices, Eigen::all);
     xi_group = xi(Eigen::all, i);
-    posterior_denominator += ((xi_group).asDiagonal() * X_group.transpose() * X_group * (xi_group).asDiagonal()) / global_variance;
-    posterior_numerator += (xi_group).asDiagonal() * X_group.transpose() * y_group / global_variance;
+    if (has_weights) {
+      // Row i has variance global_variance * v_i, so it enters with precision weight 1 / v_i
+      w_group = precision_weights(observation_indices);
+      posterior_denominator += ((xi_group).asDiagonal() * X_group.transpose() * w_group.asDiagonal() * X_group * (xi_group).asDiagonal()) / global_variance;
+      posterior_numerator += (xi_group).asDiagonal() * X_group.transpose() * w_group.cwiseProduct(y_group) / global_variance;
+    } else {
+      posterior_denominator += ((xi_group).asDiagonal() * X_group.transpose() * X_group * (xi_group).asDiagonal()) / global_variance;
+      posterior_numerator += (xi_group).asDiagonal() * X_group.transpose() * y_group / global_variance;
+    }
   }
   return posterior_denominator.inverse() * posterior_numerator;
 }
@@ -176,12 +187,21 @@ Eigen::MatrixXd MultivariateRegressionRandomEffectsModel::WorkingParameterVarian
   Eigen::MatrixXd X = dataset.GetBasis();
   Eigen::VectorXd y = residual.GetData();
   Eigen::MatrixXd xi = group_parameters_;
+  const bool has_weights = dataset.HasVarWeights();
+  Eigen::VectorXd precision_weights;
+  Eigen::VectorXd w_group;
+  if (has_weights) precision_weights = dataset.GetVarWeights().cwiseInverse();
   for (int i = 0; i < num_groups; i++) {
     observation_indices = rfx_tracker.NodeIndicesInternalIndex(i);
     X_group = X(observation_indices, Eigen::all);
     y_group = y(observation_indices, Eigen::all);
     xi_group = xi(Eigen::all, i);
-    posterior_denominator += ((xi_group).asDiagonal() * X_group.transpose() * X_group * (xi_group).asDiagonal()) / (global_variance);
+    if (has_weights) {
+      w_group = precision_weights(observation_indices);
+      posterior_denominator += ((xi_group).asDiagonal() * X_group.transpose() * w_group.asDiagonal() * X_group * (xi_group).asDiagonal()) / (global_variance);
+    } else {
+      posterior_denominator += ((xi_group).asDiagonal() * X_group.transpose() * X_group * (xi_group).asDiagonal()) / (global_variance);
+    }
   }
   return posterior_denominator.inverse();
 }
@@ -197,8 +217,15 @@ Eigen::VectorXd MultivariateRegressionRandomEffectsModel::GroupParameterMean(Ran
   std::vector<data_size_t> observation_indices = rfx_tracker.NodeIndicesInternalIndex(group_id);
   Eigen::MatrixXd X_group = X(observation_indices, Eigen::all);
   Eigen::VectorXd y_group = y(observation_indices, Eigen::all);
-  posterior_denominator += ((alpha).asDiagonal() * X_group.transpose() * X_group * (alpha).asDiagonal()) / (global_variance);
-  posterior_numerator += (alpha).asDiagonal() * X_group.transpose() * y_group / global_variance;
+  if (dataset.HasVarWeights()) {
+    // Row i has variance global_variance * v_i, so it enters with precision weight 1 / v_i
+    Eigen::VectorXd w_group = dataset.GetVarWeights()(observation_indices).cwiseInverse();
+    posterior_denominator += ((alpha).asDiagonal() * X_group.transpose() * w_group.asDiagonal() * X_group * (alpha).asDiagonal()) / (global_variance);
+    posterior_numerator += (alpha).asDiagonal() * X_group.transpose() * w_group.cwiseProduct(y_group) / global_variance;
+  } else {
+    posterior_denominator += ((alpha).asDiagonal() * X_group.transpose() * X_group * (alpha).asDiagonal()) / (global_variance);
+    posterior_numerator += (alpha).asDiagonal() * X_group.transpose() * y_group / global_variance;
+  }
   return posterior_denominator.inverse() * posterior_numerator;
 }
 
@@ -213,11 +240,18 @@ Eigen::MatrixXd MultivariateRegressionRandomEffectsModel::GroupParameterVariance
   std::vector<data_size_t> observation_indices = rfx_tracker.NodeIndicesInternalIndex(group_id);
   Eigen::MatrixXd X_group = X(observation_indices, Eigen::all);
 //  Eigen::VectorXd y_group = y(observation_indices, Eigen::all);
-  posterior_denominator += ((alpha).asDiagonal() * X_group.transpose() * X_group * (alpha).asDiagonal()) / (global_variance);
+  if (dataset.HasVarWeights()) {
+    Eigen::VectorXd w_group = dataset.GetVarWeights()(observation_indices).cwiseInverse();
+    posterior_denominator += ((alpha).asDiagonal() * X_group.transpose() * w_group.asDiagonal() * X_group * (alpha).asDiagonal()) / (global_variance);
+  } else {
+    posterior_denominator += ((alpha).asDiagonal() * X_group.transpose() * X_group * (alpha).asDiagonal()) / (global_variance);
+  }
 //  posterior_numerator += (alpha).asDiagonal() * X_group.transpose() * y_group;
   return posterior_denominator.inverse();
 }
 
+// The variance-component conditional depends on the group parameters xi only,
+// not on the residuals, so observation variance weights do not enter it.
 double MultivariateRegressionRandomEffectsModel::VarianceComponentShape(RandomEffectsDataset& dataset, ColumnVector& residual, RandomEffectsTracker& rfx_tracker, double global_variance, int32_t component_id) {
   // Gaussian group coefficients contribute J/2 to the inverse-gamma shape.
   return static_cast<double>(variance_prior_shape_ + 0.5 * num_groups_);
