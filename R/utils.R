@@ -61,12 +61,14 @@ NULL
 #'
 #' @param outcome Character string specifying the outcome type.
 #' @param link Character string specifying the link function.
+#' @param family Character string specifying the count family (count outcomes only).
 #'
 #' @return An object of class `outcome_model`.
 #' @noRd
-new_outcome_model <- function(outcome = "continuous", link = NULL) {
+new_outcome_model <- function(outcome = "continuous", link = NULL, family = NULL) {
   stopifnot((is.character(outcome)))
   stopifnot(is.character(link) || is.null(link))
+  stopifnot(is.character(family) || is.null(family))
   if (is.null(link)) {
     if (outcome == "continuous") {
       link <- "identity"
@@ -78,13 +80,16 @@ new_outcome_model <- function(outcome = "continuous", link = NULL) {
       link <- "log"
     }
   }
-  structure(
-    list(
-      outcome = outcome,
-      link = link
-    ),
-    class = "outcome_model"
-  )
+  # Only count outcomes carry a family; the other outcome models keep the
+  # two-field object they always had
+  if (identical(outcome, "count") && is.null(family)) {
+    family <- "negbin"
+  }
+  fields <- list(outcome = outcome, link = link)
+  if (!is.null(family)) {
+    fields$family <- family
+  }
+  structure(fields, class = "outcome_model")
 }
 
 #' Internal helper function validates whether an outcome model object is correctly specified
@@ -124,6 +129,17 @@ validate_outcome_model <- function(object) {
   if (object$outcome != "count" && object$link == "log") {
     stop("The 'log' link is only available for count models")
   }
+  if (object$outcome == "count") {
+    if (
+      !is.character(object$family) ||
+        length(object$family) != 1 ||
+        !(object$family %in% c("negbin", "zinb"))
+    ) {
+      stop("family must be 'negbin' or 'zinb' for count models")
+    }
+  } else if (!is.null(object$family)) {
+    stop("family is only available for count models")
+  }
   object
 }
 
@@ -134,11 +150,18 @@ validate_outcome_model <- function(object) {
 #' @param link Character string specifying the link function: `"identity"`
 #'   (continuous), `"probit"` or `"cloglog"` (binary), `"cloglog"` (ordinal), or
 #'   `"log"` (count). If `NULL`, the first listed link for the outcome type is used.
+#' @param family Count outcomes only. `"negbin"` (the default for a count
+#'   outcome) for a negative-binomial model, or `"zinb"` for a zero-inflated
+#'   negative-binomial model. Must be `NULL` for the other outcome types.
 #'
 #' @details `OutcomeModel(outcome = "count", link = "log")` selects the
 #'   negative-binomial outcome of [bart()]: `y ~ NB(mean mu, size r)` with
 #'   `log(mu) = offset + f(X)` (plus random effects), fitted by Pólya-Gamma
-#'   augmentation. It is not available in [bcf()].
+#'   augmentation. `OutcomeModel("count", "log", family = "zinb")` adds a
+#'   probit zero part: with probability `pi = Phi(g(X))` the observation is a
+#'   structural zero, otherwise it is drawn from the negative binomial. See the
+#'   "Count outcomes" section of [bart()]. Count outcomes are not available in
+#'   [bcf()].
 #'
 #' @return An object of class `outcome_model`.
 #' @export
@@ -146,8 +169,9 @@ validate_outcome_model <- function(object) {
 #' @examples
 #' my_model <- OutcomeModel(outcome = "continuous", link = "identity")
 #' count_model <- OutcomeModel(outcome = "count", link = "log")
-OutcomeModel <- function(outcome = "continuous", link = NULL) {
-  validate_outcome_model(new_outcome_model(outcome, link))
+#' zinb_model <- OutcomeModel(outcome = "count", link = "log", family = "zinb")
+OutcomeModel <- function(outcome = "continuous", link = NULL, family = NULL) {
+  validate_outcome_model(new_outcome_model(outcome, link, family))
 }
 
 #' Preprocess a parameter list, overriding defaults with any provided parameters.
