@@ -1,5 +1,22 @@
 # nashtree 0.4.6.9011
 
+* `bart()` fits zero-inflated negative-binomial outcomes with
+  `OutcomeModel("count", "log", family = "zinb")` (`family = "negbin"` stays the
+  default and samples exactly as before). With probability
+  `pi = Phi(c0 + g(X))` an observation is a structural zero, otherwise it
+  follows the negative-binomial count part. Each iteration draws the
+  structural-zero indicators, samples a probit zero forest `g` on them
+  (configured by the new `zero_forest_params`, default 50 trees with the leaf
+  scale fixed at `2 / num_trees`) and runs the Pólya-Gamma count step on the
+  non-structural rows only: structural zeros get an infinite variance weight and
+  drop out of the leaf and random-effects sufficient statistics. `r` is updated
+  over the non-structural rows; random effects enter the count part. `predict()`
+  gains `scale = "zero_probability"` (`pi`), `scale = "response"` becomes
+  `(1 - pi) mu` for this family, and the term `"zero_forest"` returns the zero
+  part; `sampleBARTPosteriorPredictive()` includes the zero mass. Draws of the
+  probit index are returned as `zero_hat_train` / `zero_hat_test`, and the zero
+  forest and family are serialized with the model.
+
 * `bart()` fits count outcomes with a negative-binomial likelihood:
   `general_params = list(outcome_model = OutcomeModel("count", "log"))` gives
   `y ~ NB(mean mu, size r)` with `log(mu) = offset + c + f(X)` plus optional

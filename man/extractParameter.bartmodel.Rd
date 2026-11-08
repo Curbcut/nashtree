@@ -30,6 +30,7 @@ The following conventions are used for parameter names:
 \item Test set variance forest predictions: \code{"sigma2_x_test"}, \code{"var_x_test"}
 \item Ordinal model cutpoints (valid only for ordinal cloglog models): \code{"cloglog_cutpoints"}, \code{"cutpoints"}
 \item Negative-binomial size (dispersion) parameter \code{r} (valid only for count models): \code{"negbin_dispersion"}, \code{"dispersion"}
+\item Zero-inflated count models: probit index of the zero probability, in sample and on the test set: \code{"zero_hat_train"}, \code{"zero_hat_test"}; the zero probability \code{pi} itself: \code{"zero_probability_train"}, \code{"zero_probability_test"}; zero forest leaf scale draws (if sampled): \code{"sigma2_leaf_zero"}
 }
 }
 \examples{

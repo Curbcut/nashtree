@@ -27,7 +27,7 @@ sampleBARTPosteriorPredictive(
 
 \item{num_draws_per_sample}{The number of posterior predictive samples to draw for each posterior sample. Defaults to a heuristic based on the number of samples in a BART model (i.e. if the BART model has >1000 draws, we use 1 draw from the likelihood per sample, otherwise we upsample to ensure intervals are based on at least 1000 posterior predictive draws).}
 
-\item{offset}{(Optional) Count models only. Log-scale offset of length \code{nrow(X)}, as in \code{\link[=predict.bartmodel]{predict.bartmodel()}}. For a count model, draws are \code{rnbinom(mu = exp(eta), size = r)} with \code{eta} the posterior linear predictor including the offset and \code{r} the matching dispersion draw.}
+\item{offset}{(Optional) Count models only. Log-scale offset of length \code{nrow(X)}, as in \code{\link[=predict.bartmodel]{predict.bartmodel()}}. For a count model, draws are \code{rnbinom(mu = exp(eta), size = r)} with \code{eta} the posterior linear predictor including the offset and \code{r} the matching dispersion draw. For a zero-inflated count model each draw is then set to 0 with the matching posterior draw of the zero probability \code{pi}.}
 }
 \value{
 Array of posterior predictive samples with dimensions (num_observations, num_posterior_samples, num_draws_per_sample) if num_draws_per_sample > 1, otherwise (num_observations, num_posterior_samples).

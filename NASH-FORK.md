@@ -135,6 +135,37 @@ Found while doing this and left unchanged:
   one half of the rows gave a fit that followed the other half. The count
   outcome follows the C++ convention: user weights multiply `1 / omega`.
 
-**Out of scope here**: zero inflation (ZINB), the count outcome in `bcf()`,
-nash integration, and the alternatives in the feasibility note (conjugate
-gamma-Poisson leaves, Laplace reversible jump).
+**Out of scope here**: zero inflation (ZINB, added below), the count outcome
+in `bcf()`, nash integration, and the alternatives in the feasibility note
+(conjugate gamma-Poisson leaves, Laplace reversible jump).
+
+## Zero-inflated negative-binomial BART outcome (0.4.6.9011)
+
+Branch `cma-zinb`, on `cma-nb` (da675755). `OutcomeModel("count", "log",
+family = "zinb")`: with probability `pi_i = Phi(c0 + g(x_i))` the row is a
+structural zero, otherwise `y_i ~ NB(mu_i, r)` as above. `g` is a probit
+"zero forest" with its own `ForestDataset` (no variance weights), `Outcome`,
+`ForestModelConfig`, `ForestModel` (tracker) and `ForestSamples`, stored like
+the variance forest (`zero_forests`, JSON `forest_1` since a count model has no
+variance forest).
+
+**Gibbs scheme**: (1) `s_i ~ Bernoulli(pi_i / (pi_i + (1 - pi_i) NB(0 | mu_i, r)))`
+for `y_i = 0`, on the log-odds scale; (2) the zero forest on `s` by the
+Albert-Chib step (truncated normal by log-scale inversion); (3) the Pólya-Gamma
+count step on rows with `s_i = 0`; rows with `s_i = 1` get variance weight
+`Inf`, so `1 / w = 0` and `y / w = 0` in every Gaussian leaf and random-effects
+sufficient statistic (tests show the forest and rfx draws are bitwise
+independent of those rows' residuals, and an all-excluded leaf draws from its
+prior); (4) `r` by the slice step over rows with `s_i = 0`; (5) random effects
+on the count part only. `min_samples_leaf` counts structural zeros too
+(documented). Initialization: a constant-rate ZINB MLE started from the
+excess-zero fraction over the NB method-of-moments fit gives `c`, `qnorm(pi)`
+(clamped) and `r`; the first `s` draw comes from the root forests, i.e. from
+that fit. `observation_weights` are refused for this family.
+
+**Recovery** (n = 2,000, 4 scenarios x 8 seeds, mean pi 0.38-0.40): rate
+correlation >= 0.952, log-rate RMSE <= 0.219, pi correlation >= 0.934, pi RMSE
+<= 0.083, response RMSE / sd <= 0.365, rfx correlation >= 0.954, r in the 99%
+interval 31 / 32. Plain NB on the same data: rate correlation 0.82-0.85,
+log-rate RMSE 0.70-0.76. **Timing** (n = 5,000, 200 count trees, ms per
+iteration): Gaussian 9.8, NB 30.3, ZINB 28.9 with 50 zero trees (27.2 with 20).
