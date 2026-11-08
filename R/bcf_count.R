@@ -178,6 +178,12 @@
     # has no variance forest
     output[["forests_zero_mu"]] <- load_forest("forest_2")
     output[["forests_zero_tau"]] <- load_forest("forest_3")
+    model_params[["has_zero_rfx"]] <- .readZeroRfxFlags(json_object_list)
+    if (model_params[["has_zero_rfx"]]) {
+      output[["zero_rfx_samples"]] <- .loadZeroRfxSamplesFromJson(
+        json_object_list
+      )
+    }
   }
   list(model_params = model_params, output = output)
 }

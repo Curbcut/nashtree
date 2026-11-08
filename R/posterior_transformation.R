@@ -708,6 +708,7 @@ sampleBCFPosteriorPredictive <- function(
       mu = as.numeric(mu_draws)
     )
     if (identical(model_object$model_params$outcome_model$family, "zinb")) {
+      # pi includes the zero-part random effects when the model has them
       pi_draws <- predict(
         model_object,
         X = X,
@@ -716,7 +717,11 @@ sampleBCFPosteriorPredictive <- function(
         rfx_group_ids = rfx_group_ids,
         rfx_basis = rfx_basis,
         type = "posterior",
-        terms = "zero_forest",
+        terms = if (isTRUE(model_object$model_params$has_zero_rfx)) {
+          "y_hat"
+        } else {
+          "zero_forest"
+        },
         scale = "zero_probability"
       )
       ppd_vector[runif(length(ppd_vector)) < as.numeric(pi_draws)] <- 0
