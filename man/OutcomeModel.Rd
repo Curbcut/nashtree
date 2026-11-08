@@ -31,8 +31,7 @@ negative-binomial outcome of \code{\link[=bart]{bart()}}: \verb{y ~ NB(mean mu, 
 augmentation. \code{OutcomeModel("count", "log", family = "zinb")} adds a
 probit zero part: with probability \code{pi = Phi(g(X))} the observation is a
 structural zero, otherwise it is drawn from the negative binomial. See the
-"Count outcomes" section of \code{\link[=bart]{bart()}}. Count outcomes are not available in
-\code{\link[=bcf]{bcf()}}.
+"Count outcomes" sections of \code{\link[=bart]{bart()}} and \code{\link[=bcf]{bcf()}}.
 }
 \examples{
 my_model <- OutcomeModel(outcome = "continuous", link = "identity")

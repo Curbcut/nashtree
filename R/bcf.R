@@ -5338,6 +5338,8 @@ plot.bcfmodel <- function(x, ...) {
 #' - In-sample treatment effect forest predictions: `"tau_hat_train"`
 #' - Test set treatment effect forest predictions: `"tau_hat_test"`
 #' - Treatment effect intercept: `"tau_0"`, `"treatment_intercept"`, `"tau_intercept"`
+#' - Negative-binomial size (dispersion) parameter `r` (count models): `"negbin_dispersion"`, `"dispersion"`
+#' - Zero-part probit indices (zero-inflated count models): `"zero_hat_train"`, `"zero_hat_test"`, `"zero_mu_hat_train"`, `"zero_mu_hat_test"`, `"zero_tau_hat_train"`, `"zero_tau_hat_test"`
 #' - In-sample variance forest predictions: `"sigma2_x_train"`, `"var_x_train"`
 #' - Test set variance forest predictions: `"sigma2_x_test"`, `"var_x_test"`
 #'

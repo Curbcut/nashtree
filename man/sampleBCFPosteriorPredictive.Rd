@@ -11,7 +11,8 @@ sampleBCFPosteriorPredictive(
   propensity = NULL,
   rfx_group_ids = NULL,
   rfx_basis = NULL,
-  num_draws_per_sample = NULL
+  num_draws_per_sample = NULL,
+  offset = NULL
 )
 }
 \arguments{
@@ -28,6 +29,8 @@ sampleBCFPosteriorPredictive(
 \item{rfx_basis}{(Optional) A matrix of bases for random effects model. Required if the BCF model includes random effects.}
 
 \item{num_draws_per_sample}{(Optional) The number of samples to draw from the likelihood for each draw of the posterior. Defaults to a heuristic based on the number of samples in a BCF model (i.e. if the BCF model has >1000 draws, we use 1 draw from the likelihood per sample, otherwise we upsample to ensure at least 1000 posterior predictive draws).}
+
+\item{offset}{(Optional) Count models only. Log-scale offset of length \code{nrow(X)}. Draws are \code{rnbinom(mu, size = r)} with the matching posterior draws of \code{mu} and \code{r}, set to 0 with probability \code{pi} for a zero-inflated model.}
 }
 \value{
 Array of posterior predictive samples with dimensions (num_observations, num_posterior_samples, num_draws_per_sample) if num_draws_per_sample > 1, otherwise (num_observations, num_posterior_samples).

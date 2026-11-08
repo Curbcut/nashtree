@@ -1,5 +1,26 @@
 # nashtree 0.4.6.9011
 
+* `bcf()` fits count outcomes: `OutcomeModel("count", "log")` (negative
+  binomial) and `OutcomeModel("count", "log", family = "zinb")`. The count part
+  is `log(mu) = offset + c + mu(X, pi_hat) + [tau_0 + tau(X)] b(Z) [+ rfx]`, so
+  the treatment effect is a log rate ratio; the Pólya-Gamma step turns each
+  iteration into the weighted Gaussian regression `bcf()` already fits, and the
+  prognostic and treatment forests (binary or continuous dose), the propensity
+  covariate, adaptive coding, `tau_0`, random effects, GFR and multiple chains
+  run on it. `tau_0` and the adaptive-coding parameters use the Pólya-Gamma
+  precision weights. The treatment-forest prior is set on the log-rate-ratio
+  scale by the new `treatment_effect_forest_params$log_rate_ratio_prior_sd`
+  (default 0.5), and `tau_0` has a `N(0, 1)` prior by default. The zero-inflated
+  family adds probit zero-part prognostic and treatment forests
+  (`zero_prognostic_forest_params`, `zero_treatment_effect_forest_params`). New
+  arguments `offset_train` / `offset_test`; `predict.bcfmodel()` gains the
+  `"rate"`, `"response"` and `"zero_probability"` scales, the `"zero_prognostic"`,
+  `"zero_tau"` and `"zero_forest"` terms and an `offset`;
+  `computeContrastBCFModel()` takes `offset_0` / `offset_1` and the count scales;
+  `sampleBCFPosteriorPredictive()` draws counts. Variance forests and
+  `sample_sigma2_global = TRUE` are refused with counts. Gaussian and probit
+  `bcf()` draws are bitwise unchanged.
+
 * `bart()` fits zero-inflated negative-binomial outcomes with
   `OutcomeModel("count", "log", family = "zinb")` (`family = "negbin"` stays the
   default and samples exactly as before). With probability
@@ -36,7 +57,7 @@
   `extractParameter(model, "dispersion")`. The leaf scale defaults to the
   Chipman, George and McCulloch (2010) calibration on the range of
   `log1p(y)`. Variance forests and `sample_sigma2_global = TRUE` are refused
-  with a count outcome, and `bcf()` does not support it yet.
+  with a count outcome.
 
 * New internal Pólya-Gamma sampler (`src/include/stochtree/polya_gamma_sampler.h`),
   written from Devroye (2009), Polson, Scott and Windle (2013) and Windle,
