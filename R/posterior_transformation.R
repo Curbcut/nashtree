@@ -711,6 +711,7 @@ sampleBCFPosteriorPredictive <- function(
 #' @param rfx_group_ids A vector of group IDs for random effects model. Required if the BART model includes random effects.
 #' @param rfx_basis A matrix of bases for random effects model. Required if the BART model includes random effects.
 #' @param num_draws_per_sample The number of posterior predictive samples to draw for each posterior sample. Defaults to a heuristic based on the number of samples in a BART model (i.e. if the BART model has >1000 draws, we use 1 draw from the likelihood per sample, otherwise we upsample to ensure intervals are based on at least 1000 posterior predictive draws).
+#' @param offset (Optional) Count models only. Log-scale offset of length `nrow(X)`, as in [predict.bartmodel()]. For a count model, draws are `rnbinom(mu = exp(eta), size = r)` with `eta` the posterior linear predictor including the offset and `r` the matching dispersion draw.
 #'
 #' @returns Array of posterior predictive samples with dimensions (num_observations, num_posterior_samples, num_draws_per_sample) if num_draws_per_sample > 1, otherwise (num_observations, num_posterior_samples).
 #'
@@ -730,13 +731,18 @@ sampleBARTPosteriorPredictive <- function(
   leaf_basis = NULL,
   rfx_group_ids = NULL,
   rfx_basis = NULL,
-  num_draws_per_sample = NULL
+  num_draws_per_sample = NULL,
+  offset = NULL
 ) {
   # Check the provided model object
   check_model_is_valid(model_object)
 
   # Determine whether the outcome is continuous (Gaussian) or binary (probit-link)
   is_gaussian <- model_object$model_params$outcome_model$link == "identity"
+  is_count <- identical(model_object$model_params$outcome_model$outcome, "count")
+  if (!is_count && !is.null(offset)) {
+    stop("offset is only supported for count (negative-binomial) models")
+  }
   is_probit <- model_object$model_params$outcome_model$link == "probit"
   is_cloglog <- model_object$model_params$outcome_model$link == "cloglog"
   is_binary_cloglog <- is_cloglog &&
@@ -847,6 +853,52 @@ sampleBARTPosteriorPredictive <- function(
     # Sample from the posterior predictive distribution
     ppd_array <- sample_gaussian_predictive_draws(ppd_mean, ppd_variance,
       num_posterior_draws, num_observations, num_draws_per_sample)
+  } else if (is_count) {
+    # Posterior draws of the rate mu = exp(eta), offset included
+    mu_draws <- predict(
+      model_object,
+      X = X,
+      leaf_basis = leaf_basis,
+      rfx_group_ids = rfx_group_ids,
+      rfx_basis = rfx_basis,
+      type = "posterior",
+      terms = "y_hat",
+      scale = "rate",
+      offset = offset
+    )
+    mu_draws <- as.matrix(mu_draws)
+    num_posterior_draws <- model_object$model_params$num_samples
+    num_observations <- nrow(X)
+    if (is.null(num_draws_per_sample)) {
+      ppd_draw_multiplier <- posterior_predictive_heuristic_multiplier(
+        num_posterior_draws,
+        num_observations
+      )
+    } else {
+      ppd_draw_multiplier <- num_draws_per_sample
+    }
+    # Column s of mu_draws pairs with dispersion draw s; recycle both across
+    # the extra draws per sample
+    size_draws <- rep(
+      model_object$negbin_dispersion_samples,
+      each = num_observations
+    )
+    ppd_vector <- rnbinom(
+      ppd_draw_multiplier * num_posterior_draws * num_observations,
+      size = size_draws,
+      mu = as.numeric(mu_draws)
+    )
+    if (ppd_draw_multiplier > 1) {
+      ppd_array <- array(
+        ppd_vector,
+        dim = c(num_observations, num_posterior_draws, ppd_draw_multiplier)
+      )
+    } else {
+      ppd_array <- array(
+        ppd_vector,
+        dim = c(num_observations, num_posterior_draws)
+      )
+    }
   } else if (is_probit || is_binary_cloglog) {
     # Compute posterior probability samples
     bart_preds <- predict(

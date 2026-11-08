@@ -74,6 +74,8 @@ new_outcome_model <- function(outcome = "continuous", link = NULL) {
       link <- "probit"
     } else if (outcome == "ordinal") {
       link <- "cloglog"
+    } else if (outcome == "count") {
+      link <- "log"
     }
   }
   structure(
@@ -95,11 +97,15 @@ validate_outcome_model <- function(object) {
   if (!inherits(object, "outcome_model")) {
     stop("Invalid outcome model")
   }
-  if (!(object$outcome %in% c("continuous", "binary", "ordinal"))) {
-    stop("Outcome type must be one of 'continuous', 'binary', or 'ordinal'")
+  if (!(object$outcome %in% c("continuous", "binary", "ordinal", "count"))) {
+    stop(
+      "Outcome type must be one of 'continuous', 'binary', 'ordinal', or 'count'"
+    )
   }
-  if (!(object$link %in% c("identity", "probit", "cloglog"))) {
-    stop("Link function must be one of 'identity', 'probit', or 'cloglog'")
+  if (!(object$link %in% c("identity", "probit", "cloglog", "log"))) {
+    stop(
+      "Link function must be one of 'identity', 'probit', 'cloglog', or 'log'"
+    )
   }
   if (object$outcome == "continuous" && object$link != "identity") {
     stop("Link function must be 'identity' for continuous models")
@@ -112,19 +118,34 @@ validate_outcome_model <- function(object) {
   if (object$outcome == "ordinal" && object$link != "cloglog") {
     stop("Link function must be 'cloglog' for ordinal models")
   }
+  if (object$outcome == "count" && object$link != "log") {
+    stop("Link function must be 'log' for count models")
+  }
+  if (object$outcome != "count" && object$link == "log") {
+    stop("The 'log' link is only available for count models")
+  }
   object
 }
 
 #' Create a New Outcome Model Object
 #'
-#' @param outcome Character string specifying the outcome type.
-#' @param link Character string specifying the link function.
+#' @param outcome Character string specifying the outcome type: `"continuous"`,
+#'   `"binary"`, `"ordinal"` or `"count"`.
+#' @param link Character string specifying the link function: `"identity"`
+#'   (continuous), `"probit"` or `"cloglog"` (binary), `"cloglog"` (ordinal), or
+#'   `"log"` (count). If `NULL`, the first listed link for the outcome type is used.
+#'
+#' @details `OutcomeModel(outcome = "count", link = "log")` selects the
+#'   negative-binomial outcome of [bart()]: `y ~ NB(mean mu, size r)` with
+#'   `log(mu) = offset + f(X)` (plus random effects), fitted by Pólya-Gamma
+#'   augmentation. It is not available in [bcf()].
 #'
 #' @return An object of class `outcome_model`.
 #' @export
 #'
 #' @examples
 #' my_model <- OutcomeModel(outcome = "continuous", link = "identity")
+#' count_model <- OutcomeModel(outcome = "count", link = "log")
 OutcomeModel <- function(outcome = "continuous", link = NULL) {
   validate_outcome_model(new_outcome_model(outcome, link))
 }

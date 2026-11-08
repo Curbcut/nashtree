@@ -107,6 +107,12 @@ NULL
 #' effects are supported: the retained samples of the random effects container
 #' are kept alongside the selected forests. Cannot be combined with importance
 #' retention. Default `NULL` keeps existing behavior.
+#' @param offset_train (Optional) Count outcomes only. Numeric vector of length `nrow(X_train)` added to the
+#'   linear predictor on the log scale, `log(mu_i) = offset_train[i] + f(X_i)`, typically the log of an
+#'   exposure such as population or time at risk. Default: `NULL` (no offset).
+#' @param offset_test (Optional) Count outcomes only. Offset for `X_test`, of length `nrow(X_test)`. If
+#'   `offset_train` is supplied and `offset_test` is not, test-set predictions use an offset of 0 (unit
+#'   exposure) and a warning is raised.
 #' @param forest_retention Forest output policy: `"all"` (default) retains the usual model.
 #' `"importance"` accumulates aggregate mean-forest split counts across exactly
 #' the retained iterations, without retaining posterior forests. It returns a
@@ -137,7 +143,11 @@ NULL
 #'   - `keep_every` How many iterations of the burned-in MCMC sampler should be run before forests and parameters are retained. Default `1`. Setting `keep_every <- k` for some `k > 1` will "thin" the MCMC samples by retaining every `k`-th sample, rather than simply every sample. This can reduce the autocorrelation of the MCMC samples.
 #'   - `num_chains` How many independent MCMC chains should be sampled. If `num_mcmc = 0`, this is ignored. If `num_gfr = 0`, then each chain is run from root for `num_mcmc * keep_every + num_burnin` iterations, with `num_mcmc` samples retained. If `num_gfr > 0`, each MCMC chain will be initialized from a separate GFR ensemble, with the requirement that `num_gfr >= num_chains`. Default: `1`. Note that if `num_chains > 1`, the returned model object will contain samples from all chains, stored consecutively. That is, if there are 4 chains with 100 samples each, the first 100 samples will be from chain 1, the next 100 samples will be from chain 2, etc... For more detail on working with multi-chain BART models, see [the multi chain vignette](https://stochtree.ai/vignettes/multi-chain.html).
 #'   - `verbose` Whether or not to print progress during the sampling loops. Default: `FALSE`.
-#'   - `outcome_model` A structured `OutcomeModel` object that specifies the outcome type and desired link function. This argument pre-empts the legacy (deprecated) `probit_outcome_model` option. Default: `OutcomeModel(outcome='continuous', link='identity')`.
+#'   - `outcome_model` A structured `OutcomeModel` object that specifies the outcome type and desired link function. This argument pre-empts the legacy (deprecated) `probit_outcome_model` option. Default: `OutcomeModel(outcome='continuous', link='identity')`. `OutcomeModel(outcome = 'count', link = 'log')` fits a negative-binomial model, see "Count outcomes" below.
+#'   - `negbin_dispersion_prior_shape` Count outcomes only. Shape `a0` of the `Gamma(a0, b0)` (shape, rate) prior on the negative-binomial size (dispersion) parameter `r`. Default: `1`.
+#'   - `negbin_dispersion_prior_rate` Count outcomes only. Rate `b0` of the same prior. Default: `0.01`, so the default prior is exponential with mean 100 and allows near-Poisson data.
+#'   - `negbin_dispersion_init` Count outcomes only. Starting value of `r`. Defaults to a method-of-moments estimate around the constant-rate fit, clamped to `[0.1, 1000]`.
+#'   - `sample_negbin_dispersion` Count outcomes only. Whether to sample `r`. If `FALSE`, `r` stays at `negbin_dispersion_init`. Default: `TRUE`.
 #'   - `probit_outcome_model` Deprecated in favor of `outcome_model`. Whether or not the outcome should be modeled as explicitly binary via a probit link. If `TRUE`, `y` must only contain the values `0` and `1`. Default: `FALSE`.
 #'   - `num_threads` Number of threads to use in the GFR and MCMC algorithms, as well as prediction. Defaults to `1` (single-threaded). Set to `-1` to use the maximum number of available threads, or a positive integer for a specific count. OpenMP must be available for values other than `1`.
 #'
@@ -181,6 +191,28 @@ NULL
 #'   - `variance_prior_shape` Shape parameter for the inverse gamma prior on the variance of the random effects "group parameter." Default: `1`.
 #'   - `variance_prior_scale` Scale parameter for the inverse gamma prior on the variance of the random effects "group parameter." Default: `1`.
 #'   - `unseen_groups` How prediction handles group labels that were not present in `rfx_group_ids_train`. `"error"` (the default) stops, as in previous versions. `"mean"` gives those rows the posterior mean random effect across the sampled groups, draw by draw, which is a population-average prediction for an unseen group. The choice is stored with the model and honoured by `predict()`, the posterior predictive samplers and test-set predictions.
+#'
+#' @section Count outcomes:
+#' With `general_params = list(outcome_model = OutcomeModel("count", "log"))`, `y_train` must hold
+#' non-negative integers and the model is
+#' `y_i ~ NB(mean mu_i, size r)`, `log(mu_i) = offset_i + c + f(X_i) [+ random effects]`,
+#' so that `Var(y_i) = mu_i + mu_i^2 / r`. `c = log(sum(y) / sum(exp(offset)))` is a fixed centering
+#' constant (stored as `model_params$outcome_mean`) and `f` is the mean forest. Each iteration draws
+#' Pólya-Gamma variables `omega_i ~ PG(y_i + r, log(mu_i) - log(r))` (Polson, Scott and Windle 2013), which turn
+#' the likelihood into a Gaussian regression of `(y_i - r) / (2 omega_i)` with variance `1 / omega_i`; the
+#' forest and random effects are then sampled by the usual Gaussian samplers with variance weights
+#' `1 / omega_i` and the global error variance fixed at 1. `r` is drawn from its full conditional given
+#' the current means by slice sampling on `log(r)`. A variance forest cannot be combined with a count
+#' outcome, and `sample_sigma2_global = TRUE` is refused. `observation_weights`, if supplied, multiply the
+#' per-iteration variance weights.
+#'
+#' Unless `sigma2_leaf_init` is set, the mean-forest leaf scale is calibrated on the log scale as in
+#' Chipman, George and McCulloch (2010): `sigma2_leaf_init = (R / (2 k sqrt(num_trees)))^2` with
+#' `k = 2` and `R` the range of `log1p(y_train)`.
+#'
+#' `y_hat_train` and `y_hat_test` hold draws of the linear predictor `log(mu)` including the offset, and
+#' the draws of `r` are returned as `negbin_dispersion_samples`. Use `predict(..., scale = "rate")` for
+#' `mu` and [sampleBARTPosteriorPredictive()] for counts.
 #'
 #' @return List of sampling outputs and a wrapper around the sampled forests (which can be used for in-memory prediction on new data, or serialized to JSON on disk).
 #' @export
@@ -230,7 +262,9 @@ bart <- function(
   variance_forest_params = list(),
   random_effects_params = list(),
   forest_retention = c("all", "importance"),
-  retained_sample_ids = NULL
+  retained_sample_ids = NULL,
+  offset_train = NULL,
+  offset_test = NULL
 ) {
   forest_retention <- match.arg(forest_retention)
   importance_only <- identical(forest_retention, "importance")
@@ -252,7 +286,11 @@ bart <- function(
     verbose = FALSE,
     outcome_model = OutcomeModel(outcome = "continuous", link = "identity"),
     probit_outcome_model = FALSE,
-    num_threads = 1
+    num_threads = 1,
+    negbin_dispersion_prior_shape = 1,
+    negbin_dispersion_prior_rate = 0.01,
+    negbin_dispersion_init = NULL,
+    sample_negbin_dispersion = TRUE
   )
   general_params_updated <- preprocessParams(
     general_params_default,
@@ -336,6 +374,10 @@ bart <- function(
   outcome_model <- general_params_updated$outcome_model
   probit_outcome_model <- general_params_updated$probit_outcome_model
   num_threads <- general_params_updated$num_threads
+  negbin_dispersion_prior_shape <- general_params_updated$negbin_dispersion_prior_shape
+  negbin_dispersion_prior_rate <- general_params_updated$negbin_dispersion_prior_rate
+  negbin_dispersion_init <- general_params_updated$negbin_dispersion_init
+  sample_negbin_dispersion <- general_params_updated$sample_negbin_dispersion
 
   # 2. Mean forest parameters
   num_trees_mean <- mean_forest_params_updated$num_trees
@@ -422,9 +464,11 @@ bart <- function(
   link_is_linear <- FALSE
   link_is_probit <- FALSE
   link_is_cloglog <- FALSE
+  link_is_log <- FALSE
   outcome_is_continuous <- FALSE
   outcome_is_binary <- FALSE
   outcome_is_ordinal <- FALSE
+  outcome_is_count <- FALSE
   if (
     outcome_model$outcome == "continuous" && outcome_model$link == "identity"
   ) {
@@ -445,6 +489,9 @@ bart <- function(
   ) {
     link_is_cloglog <- TRUE
     outcome_is_ordinal <- TRUE
+  } else if (outcome_model$outcome == "count" && outcome_model$link == "log") {
+    link_is_log <- TRUE
+    outcome_is_count <- TRUE
   } else {
     stop(paste0(
       "Invalid outcome model specification, outcome = ",
@@ -452,6 +499,88 @@ bart <- function(
       ", link = ",
       outcome_model$link
     ))
+  }
+
+  # Count (negative-binomial) outcome: validate before changing RNG state
+  if (!link_is_log) {
+    if (!is.null(offset_train) || !is.null(offset_test)) {
+      stop(
+        "offset_train and offset_test are only supported for count outcomes (OutcomeModel(outcome = 'count', link = 'log'))"
+      )
+    }
+  } else {
+    if (num_trees_mean <= 0) {
+      stop("A count outcome requires a mean forest (mean_forest_params$num_trees > 0)")
+    }
+    if (num_trees_variance > 0) {
+      stop(
+        "A variance forest cannot be combined with a count outcome: the negative-binomial variance is mu + mu^2 / r"
+      )
+    }
+    if (isTRUE(general_params[["sample_sigma2_global"]])) {
+      stop(
+        "sample_sigma2_global = TRUE is not supported with a count outcome: the global error variance of the Polya-Gamma augmented model is fixed at 1"
+      )
+    }
+    sample_sigma2_global <- FALSE
+    y_count_check <- as.numeric(y_train)
+    if (anyNA(y_count_check) || any(!is.finite(y_count_check))) {
+      stop("A count outcome must not contain missing or infinite values")
+    }
+    if (any(y_count_check < 0) || any(y_count_check != round(y_count_check))) {
+      stop("A count outcome must contain non-negative integers only")
+    }
+    if (all(y_count_check == 0)) {
+      stop("A count outcome must contain at least one positive count")
+    }
+    if (
+      !is.numeric(negbin_dispersion_prior_shape) ||
+        length(negbin_dispersion_prior_shape) != 1 ||
+        !is.finite(negbin_dispersion_prior_shape) ||
+        negbin_dispersion_prior_shape <= 0 ||
+        !is.numeric(negbin_dispersion_prior_rate) ||
+        length(negbin_dispersion_prior_rate) != 1 ||
+        !is.finite(negbin_dispersion_prior_rate) ||
+        negbin_dispersion_prior_rate < 0
+    ) {
+      stop(
+        "negbin_dispersion_prior_shape must be a positive number and negbin_dispersion_prior_rate a non-negative number"
+      )
+    }
+    if (
+      !is.null(negbin_dispersion_init) &&
+        (!is.numeric(negbin_dispersion_init) ||
+          length(negbin_dispersion_init) != 1 ||
+          !is.finite(negbin_dispersion_init) ||
+          negbin_dispersion_init <= 0)
+    ) {
+      stop("negbin_dispersion_init must be a single positive number")
+    }
+    if (is.null(negbin_dispersion_init) && !isTRUE(sample_negbin_dispersion)) {
+      stop("negbin_dispersion_init must be supplied when sample_negbin_dispersion = FALSE")
+    }
+    negbin_offset_train <- if (is.null(offset_train)) {
+      rep(0, NROW(X_train))
+    } else {
+      .validateNegbinOffset(offset_train, NROW(X_train), "offset_train")
+    }
+    if (!is.null(offset_test)) {
+      if (is.null(X_test)) {
+        stop("offset_test was supplied without X_test")
+      }
+      negbin_offset_test <- .validateNegbinOffset(
+        offset_test,
+        NROW(X_test),
+        "offset_test"
+      )
+    } else if (!is.null(X_test)) {
+      if (!is.null(offset_train)) {
+        warning(
+          "offset_train was supplied but offset_test was not; test-set predictions use an offset of 0 (unit exposure)"
+        )
+      }
+      negbin_offset_test <- rep(0, NROW(X_test))
+    }
   }
 
   # Set a function-scoped RNG if user provided a random seed
@@ -541,6 +670,20 @@ bart <- function(
     } else {
       previous_rfx_samples <- NULL
     }
+    previous_is_count <- identical(
+      previous_bart_model$model_params$outcome_model$outcome,
+      "count"
+    )
+    if (previous_is_count != link_is_log) {
+      stop(
+        "previous_model_json and the current call must both use a count outcome, or neither"
+      )
+    }
+    previous_negbin_dispersion_samples <- if (previous_is_count) {
+      previous_bart_model$negbin_dispersion_samples
+    } else {
+      NULL
+    }
     if (previous_bart_model$model_params$outcome_model$link == "cloglog") {
       previous_cloglog_cutpoint_samples <- previous_bart_model$cloglog_cutpoint_samples
       previous_cloglog_num_categories <- previous_bart_model$cloglog_num_categories
@@ -565,6 +708,7 @@ bart <- function(
     previous_cloglog_cutpoint_samples <- NULL
     previous_cloglog_num_categories <- 0
     previous_model_num_samples <- 0
+    previous_negbin_dispersion_samples <- NULL
   }
 
   # Determine whether conditional mean, variance, or both will be modeled
@@ -1212,6 +1356,63 @@ bart <- function(
     # Set shape and rate parameters for conditional gamma model
     cloglog_forest_shape <- 2.0
     cloglog_forest_rate <- 2.0
+  } else if (link_is_log) {
+    # Negative-binomial outcome on the log scale. The centering constant c plays
+    # the role of y_bar_train for probit: the forest models log(mu) - offset - c
+    # and c is added back at prediction time. c is the maximum-likelihood
+    # constant log rate, log(sum(y) / sum(exp(offset))).
+    negbin_y <- as.numeric(y_train)
+    y_bar_train <- log(sum(negbin_y) / sum(exp(negbin_offset_train)))
+    y_std_train <- 1
+    standardize <- FALSE
+
+    # Placeholder residual; the first Polya-Gamma step overwrites it
+    resid_train <- rep(0, length(negbin_y))
+    init_val_mean <- 0.0
+
+    # The augmented Gaussian regression has its error variance fixed at 1
+    sigma2_init <- 1.0
+    current_sigma2 <- sigma2_init
+
+    # Starting value of the dispersion r
+    if (is.null(negbin_dispersion_init)) {
+      negbin_dispersion_init <- .negbinDispersionInit(
+        negbin_y,
+        exp(negbin_offset_train + y_bar_train)
+      )
+    }
+    current_dispersion <- negbin_dispersion_init
+
+    # Leaf scale calibrated on the log scale (Chipman, George and McCulloch
+    # 2010, with k = 2): leaf sd = R / (2 k sqrt(num_trees)), R the range of log1p(y)
+    log_count_range <- diff(range(log1p(negbin_y)))
+    if (!is.finite(log_count_range) || log_count_range <= 0) {
+      log_count_range <- 1
+    }
+    negbin_leaf_var <- (log_count_range / (2 * 2 * sqrt(num_trees_mean)))^2
+    if (is.null(b_leaf)) {
+      b_leaf <- negbin_leaf_var / 2
+    }
+    leaf_dim_init <- if (has_basis) ncol(leaf_basis_train) else 1
+    if (is.null(sigma2_leaf_init)) {
+      sigma2_leaf_init <- if (leaf_dim_init > 1) {
+        diag(negbin_leaf_var, leaf_dim_init)
+      } else {
+        as.matrix(negbin_leaf_var)
+      }
+    }
+    if (!is.matrix(sigma2_leaf_init)) {
+      current_leaf_scale <- as.matrix(diag(sigma2_leaf_init, leaf_dim_init))
+    } else {
+      current_leaf_scale <- sigma2_leaf_init
+    }
+
+    # Variance weights: user observation weights (if any) times 1 / omega
+    negbin_base_variance_weights <- if (is.null(observation_weights)) {
+      rep(1, length(negbin_y))
+    } else {
+      as.numeric(observation_weights)
+    }
   } else {
     # Only standardize if user requested
     if (standardize) {
@@ -1326,12 +1527,18 @@ bart <- function(
     leaf_regression = FALSE
   }
 
-  # Data
+  # Data. A count outcome always carries variance weights (1 / omega), which
+  # the Polya-Gamma step overwrites every iteration.
+  forest_variance_weights <- if (link_is_log) {
+    negbin_base_variance_weights
+  } else {
+    observation_weights
+  }
   if (leaf_regression) {
     forest_dataset_train <- createForestDataset(
       X_train,
       leaf_basis_train,
-      observation_weights
+      forest_variance_weights
     )
     if (has_test) {
       forest_dataset_test <- createForestDataset(X_test, leaf_basis_test)
@@ -1340,7 +1547,7 @@ bart <- function(
   } else {
     forest_dataset_train <- createForestDataset(
       X_train,
-      variance_weights = observation_weights
+      variance_weights = forest_variance_weights
     )
     if (has_test) {
       forest_dataset_test <- createForestDataset(X_test)
@@ -1503,7 +1710,8 @@ bart <- function(
     # Random effects data structure and storage container
     rfx_dataset_train <- createRandomEffectsDataset(
       rfx_group_ids_train,
-      rfx_basis_train
+      rfx_basis_train,
+      if (link_is_log) negbin_base_variance_weights else NULL
     )
     rfx_tracker_train <- createRandomEffectsTracker(rfx_group_ids_train)
     rfx_model <- createRandomEffectsModel(
@@ -1536,6 +1744,9 @@ bart <- function(
   }
   if (sample_sigma2_leaf) {
     leaf_scale_samples <- rep(NA, num_retained_samples)
+  }
+  if (link_is_log) {
+    negbin_dispersion_samples <- rep(NA_real_, num_retained_samples)
   }
   if (link_is_cloglog) {
     cloglog_cutpoint_samples <- matrix(
@@ -1642,6 +1853,67 @@ bart <- function(
     )
   }
 
+  # Gibbs steps of the count (negative-binomial) outcome, shared by the GFR
+  # and MCMC loops. See R/negbin.R for the derivation.
+  if (link_is_log) {
+    # Polya-Gamma step: omega | eta, r, then the pseudo-outcome and the
+    # variance weights seen by the forest and random-effects samplers
+    negbin_latent_update <- function() {
+      forest_pred <- active_forest_mean$predict(forest_dataset_train)
+      rfx_pred <- if (has_rfx) {
+        rfx_model$predict(rfx_dataset_train, rfx_tracker_train)
+      } else {
+        0
+      }
+      log_dispersion <- log(current_dispersion)
+      psi <- negbin_offset_train + y_bar_train + forest_pred + rfx_pred -
+        log_dispersion
+      omega <- sample_polya_gamma_cpp(
+        negbin_y + current_dispersion,
+        psi,
+        rng$rng_ptr
+      )
+      # (y - r) / (2 omega) ~ N(psi, 1 / omega); forest and rfx fit psi net of
+      # the offset, the centering constant and -log(r)
+      pseudo_outcome <- (negbin_y - current_dispersion) / (2 * omega) -
+        negbin_offset_train -
+        y_bar_train +
+        log_dispersion
+      outcome_train$update_data(pseudo_outcome - forest_pred - rfx_pred)
+      variance_weights <- negbin_base_variance_weights / omega
+      forest_dataset_train$update_variance_weights(
+        variance_weights,
+        exponentiate = FALSE
+      )
+      if (has_rfx) {
+        rfx_dataset_train$update_variance_weights(
+          variance_weights,
+          exponentiate = FALSE
+        )
+      }
+    }
+    # Dispersion step: r | y, mu
+    negbin_dispersion_update <- function() {
+      if (!isTRUE(sample_negbin_dispersion)) {
+        return(current_dispersion)
+      }
+      forest_pred <- forest_model_mean$get_cached_forest_predictions()
+      rfx_pred <- if (has_rfx) {
+        rfx_model$predict(rfx_dataset_train, rfx_tracker_train)
+      } else {
+        0
+      }
+      mu <- exp(negbin_offset_train + y_bar_train + forest_pred + rfx_pred)
+      .negbinSampleDispersion(
+        current_dispersion,
+        negbin_y,
+        mu,
+        negbin_dispersion_prior_shape,
+        negbin_dispersion_prior_rate
+      )
+    }
+  }
+
   # Run GFR (warm start) if specified
   if (num_gfr > 0) {
     for (i in 1:num_gfr) {
@@ -1691,6 +1963,9 @@ bart <- function(
 
           # Update outcome: center z by y_bar_train before passing to forest
           outcome_train$update_data(resid_train - y_bar_train - outcome_pred)
+        }
+        if (link_is_log) {
+          negbin_latent_update()
         }
 
         # Sample mean forest
@@ -1825,6 +2100,12 @@ bart <- function(
           rng
         )
       }
+      if (link_is_log) {
+        current_dispersion <- negbin_dispersion_update()
+        if (keep_sample) {
+          negbin_dispersion_samples[sample_counter] <- current_dispersion
+        }
+      }
     }
   }
 
@@ -1923,6 +2204,9 @@ bart <- function(
           global_model_config$update_global_error_variance(
             current_sigma2
           )
+        }
+        if (link_is_log) {
+          current_dispersion <- negbin_dispersion_samples[forest_ind + 1]
         }
       } else if (has_prev_model) {
         warmstart_index <- ifelse(
@@ -2049,6 +2333,11 @@ bart <- function(
             )
           }
         }
+        if (link_is_log && !is.null(previous_negbin_dispersion_samples)) {
+          current_dispersion <- previous_negbin_dispersion_samples[
+            warmstart_index
+          ]
+        }
       } else {
         if (include_mean_forest) {
           resetActiveForest(active_forest_mean)
@@ -2128,6 +2417,9 @@ bart <- function(
           global_model_config$update_global_error_variance(
             current_sigma2
           )
+        }
+        if (link_is_log) {
+          current_dispersion <- negbin_dispersion_init
         }
       }
       for (i in (num_gfr + 1):num_samples) {
@@ -2226,6 +2518,9 @@ bart <- function(
             outcome_train$update_data(
               resid_train - y_bar_train - outcome_pred
             )
+          }
+          if (link_is_log) {
+            negbin_latent_update()
           }
 
           forest_model_mean$sample_one_iteration(
@@ -2364,6 +2659,12 @@ bart <- function(
             rng
           )
         }
+        if (link_is_log) {
+          current_dispersion <- negbin_dispersion_update()
+          if (keep_sample) {
+            negbin_dispersion_samples[sample_counter] <- current_dispersion
+          }
+        }
       }
     }
   }
@@ -2405,6 +2706,11 @@ bart <- function(
     if (sample_sigma2_leaf) {
       leaf_scale_samples <- leaf_scale_samples[
         (num_gfr + 1):length(leaf_scale_samples)
+      ]
+    }
+    if (link_is_log) {
+      negbin_dispersion_samples <- negbin_dispersion_samples[
+        (num_gfr + 1):length(negbin_dispersion_samples)
       ]
     }
     num_retained_samples <- num_retained_samples - num_gfr
@@ -2453,6 +2759,14 @@ bart <- function(
     ) *
       y_std_train
     y_hat_test <- y_hat_test + rfx_preds_test
+  }
+
+  # Count outcome: y_hat holds the full linear predictor log(mu), offset included
+  if (link_is_log && !importance_only) {
+    y_hat_train <- y_hat_train + negbin_offset_train
+    if (has_test) {
+      y_hat_test <- y_hat_test + negbin_offset_test
+    }
   }
 
   # Global error variance
@@ -2540,6 +2854,13 @@ bart <- function(
     "rfx_model_spec" = rfx_model_spec,
     "rfx_unseen_groups" = rfx_unseen_groups
   )
+  if (link_is_log) {
+    model_params[["has_offset"]] <- !is.null(offset_train)
+    model_params[["negbin_dispersion_prior_shape"]] <- negbin_dispersion_prior_shape
+    model_params[["negbin_dispersion_prior_rate"]] <- negbin_dispersion_prior_rate
+    model_params[["negbin_dispersion_init"]] <- negbin_dispersion_init
+    model_params[["sample_negbin_dispersion"]] <- isTRUE(sample_negbin_dispersion)
+  }
   result <- list(
     "model_params" = model_params,
     "train_set_metadata" = X_train_metadata
@@ -2564,6 +2885,9 @@ bart <- function(
   }
   if (sample_sigma2_leaf) {
     result[["sigma2_leaf_samples"]] = tau_samples
+  }
+  if (link_is_log) {
+    result[["negbin_dispersion_samples"]] = negbin_dispersion_samples
   }
   if (has_rfx) {
     result[["rfx_samples"]] = rfx_samples
@@ -2647,7 +2971,8 @@ bart <- function(
 #' @param rfx_basis (Optional) Test set basis for "random-slope" regression in additive random effects model.
 #' @param type (Optional) Type of prediction to return. Options are "mean", which averages the predictions from every draw of a BART model, and "posterior", which returns the entire matrix of posterior predictions. Default: "posterior".
 #' @param terms (Optional) Which model terms to include in the prediction. This can be a single term or a list of model terms. Options include "y_hat", "mean_forest", "rfx", "variance_forest", or "all". If a model doesn't have mean forest, random effects, or variance forest predictions, but one of those terms is request, the request will simply be ignored. If none of the requested terms are present in a model, this function will return `NULL` along with a warning. Default: "all".
-#' @param scale (Optional) Scale of mean function predictions. Options are "linear", which returns predictions on the original scale of the mean forest / RFX terms, "probability", which transforms predictions into class probabilities for models with discrete outcomes, and "class", which returns predicted outcome categories for discrete outcome models. "probability" is only valid for outcome models with `outcome == 'binary'` or `outcome == 'ordinal'`. For binary outcomes, this will return the probability that `y == 1`, and for ordinal outcomes, this will return probabilities for each outcome label. Default: "linear".
+#' @param scale (Optional) Scale of mean function predictions. Options are "linear", which returns predictions on the original scale of the mean forest / RFX terms, "probability", which transforms predictions into class probabilities for models with discrete outcomes, and "class", which returns predicted outcome categories for discrete outcome models. "probability" is only valid for outcome models with `outcome == 'binary'` or `outcome == 'ordinal'`. For binary outcomes, this will return the probability that `y == 1`, and for ordinal outcomes, this will return probabilities for each outcome label. For count (negative-binomial) models, "linear" returns the log rate `eta = offset + c + f(X) [+ rfx]`, "rate" returns `mu = exp(eta)`, and "response" is an alias of "rate"; on the "rate" scale the mean-forest term is `exp(c + f(X))` and the random-effects term is the multiplicative rate ratio `exp(rfx)`. "rate" and "response" are only valid for count models, and "probability" and "class" are not valid for them. With `type = "mean"`, transformed draws are averaged, so "rate" gives the posterior mean of `mu`. Default: "linear".
+#' @param offset (Optional) Count models only. Log-scale offset of length `nrow(X)` added to the linear predictor, as `offset_train` in [bart()]. If the model was fit with an offset and none is given here, an offset of 0 (unit exposure) is used with a warning. Default: `NULL`.
 #' @param ... (Optional) Other prediction parameters.
 #'
 #' @return List of prediction matrices or single prediction matrix / vector, depending on the terms requested.
@@ -2686,16 +3011,33 @@ predict.bartmodel <- function(
   type = "posterior",
   terms = "all",
   scale = "linear",
+  offset = NULL,
   ...
 ) {
   # Handle mean function scale
   if (!is.character(scale)) {
     stop("scale must be a string or character vector")
   }
-  if (!(scale %in% c("linear", "probability", "class"))) {
-    stop("scale must either be 'linear', 'probability', or 'class'")
+  if (!(scale %in% c("linear", "probability", "class", "rate", "response"))) {
+    stop(
+      "scale must be 'linear', 'probability', or 'class' ('rate' or 'response' for count models)"
+    )
   }
   outcome_model <- object$model_params$outcome_model
+  is_count <- identical(outcome_model$outcome, "count") &&
+    identical(outcome_model$link, "log")
+  if (is_count && (scale %in% c("probability", "class"))) {
+    stop(
+      "scale cannot be 'probability' or 'class' for a count model; use 'linear', 'rate' or 'response'"
+    )
+  }
+  if (!is_count && (scale %in% c("rate", "response"))) {
+    stop("scale can only be 'rate' or 'response' for a count (negative-binomial) model")
+  }
+  if (!is_count && !is.null(offset)) {
+    stop("offset is only supported for count (negative-binomial) models")
+  }
+  rate_scale <- is_count && (scale %in% c("rate", "response"))
   is_probit <- (outcome_model$link == "probit" &&
     outcome_model$outcome == "binary")
   is_binary_cloglog <- (outcome_model$link == "cloglog" &&
@@ -2820,6 +3162,20 @@ predict.bartmodel <- function(
       stop(
         "Random effects basis has a different dimension than the basis used to train this model"
       )
+    }
+  }
+
+  # Count models: offset on the log scale, added to y_hat only
+  if (is_count) {
+    if (is.null(offset)) {
+      if (isTRUE(object$model_params$has_offset) && predict_y_hat) {
+        warning(
+          "This model was fit with an offset but none was supplied; predictions use an offset of 0 (unit exposure)"
+        )
+      }
+      offset <- rep(0, nrow(X))
+    } else {
+      offset <- .validateNegbinOffset(offset, nrow(X), "offset")
     }
   }
 
@@ -3025,6 +3381,22 @@ predict.bartmodel <- function(
     } else if (predict_y_hat && has_rfx) {
       y_hat <- rfx_predictions
     }
+    if (is_count) {
+      if (predict_y_hat) {
+        y_hat <- y_hat + offset
+      }
+      if (rate_scale) {
+        if (predict_y_hat) {
+          y_hat <- exp(y_hat)
+        }
+        if (predict_mean_forest) {
+          mean_forest_predictions <- exp(mean_forest_predictions)
+        }
+        if (predict_rfx) {
+          rfx_predictions <- exp(rfx_predictions)
+        }
+      }
+    }
   }
 
   # Collapse to posterior mean predictions if requested
@@ -3118,6 +3490,9 @@ print.bartmodel <- function(x, ...) {
   if (x$model_params$sample_sigma2_leaf) {
     model_terms <- c(model_terms, "mean forest leaf scale model")
   }
+  if (isTRUE(x$model_params$sample_negbin_dispersion)) {
+    model_terms <- c(model_terms, "negative-binomial dispersion model")
+  }
   if (length(model_terms) > 2) {
     summary_message <- paste0(
       "nashtree::bart() run with ",
@@ -3158,6 +3533,11 @@ print.bartmodel <- function(x, ...) {
   } else if (is_probit) {
     outcome_model_summary <- paste0(
       "Binary outcome was modeled with a probit link function"
+    )
+  } else if (identical(outcome_model$outcome, "count")) {
+    outcome_model_summary <- paste0(
+      "Count outcome was modeled as negative binomial with a log link (Polya-Gamma augmentation)",
+      ifelse(isTRUE(x$model_params$has_offset), " and an offset", "")
     )
   } else {
     outcome_model_summary <- paste0(
@@ -3299,6 +3679,18 @@ summary.bartmodel <- function(object, ...) {
     print(quantiles_sigma2)
   }
 
+  # Negative-binomial dispersion
+  if (!is.null(object$negbin_dispersion_samples)) {
+    r_samples <- object$negbin_dispersion_samples
+    cat(sprintf(
+      "Summary of negative-binomial dispersion (size r) posterior: \n%d samples, mean = %.3f, standard deviation = %.3f, quantiles:\n",
+      length(r_samples),
+      mean(r_samples),
+      sd(r_samples)
+    ))
+    print(quantile(r_samples, probs = c(0.025, 0.1, 0.25, 0.5, 0.75, 0.9, 0.975)))
+  }
+
   # Determine whether outcome model is binary / ordinal
   outcome_model <- object$model_params$outcome_model
   is_probit <- (outcome_model$link == "probit" &&
@@ -3321,7 +3713,9 @@ summary.bartmodel <- function(object, ...) {
       y_hat_train_mean,
       probs = c(0.025, 0.1, 0.25, 0.5, 0.75, 0.9, 0.975)
     )
-    if (non_continuous_outcome) {
+    if (identical(outcome_model$outcome, "count")) {
+      summary_text <- "Summary of in-sample log-rate (linear predictor) posterior means: \n%d observations, mean = %.3f, standard deviation = %.3f, quantiles:\n"
+    } else if (non_continuous_outcome) {
       summary_text <- "Summary of in-sample inverse-link-scale posterior predictions: \n%d observations, mean = %.3f, standard deviation = %.3f, quantiles:\n"
     } else {
       summary_text <- "Summary of in-sample posterior mean predictions: \n%d observations, mean = %.3f, standard deviation = %.3f, quantiles:\n"
@@ -3345,7 +3739,9 @@ summary.bartmodel <- function(object, ...) {
       y_hat_test_mean,
       probs = c(0.025, 0.1, 0.25, 0.5, 0.75, 0.9, 0.975)
     )
-    if (non_continuous_outcome) {
+    if (identical(outcome_model$outcome, "count")) {
+      summary_text <- "Summary of test-set log-rate (linear predictor) posterior means: \n%d observations, mean = %.3f, standard deviation = %.3f, quantiles:\n"
+    } else if (non_continuous_outcome) {
       summary_text <- "Summary of test-set inverse-link-scale posterior predictions: \n%d observations, mean = %.3f, standard deviation = %.3f, quantiles:\n"
     } else {
       summary_text <- "Summary of test-set posterior mean predictions: \n%d observations, mean = %.3f, standard deviation = %.3f, quantiles:\n"
@@ -3544,6 +3940,7 @@ getRandomEffectSamples.bartmodel <- function(object, ...) {
 #' - In-sample variance forest predictions: `"sigma2_x_train"`, `"var_x_train"`
 #' - Test set variance forest predictions: `"sigma2_x_test"`, `"var_x_test"`
 #' - Ordinal model cutpoints (valid only for ordinal cloglog models): `"cloglog_cutpoints"`, `"cutpoints"`
+#' - Negative-binomial size (dispersion) parameter `r` (valid only for count models): `"negbin_dispersion"`, `"dispersion"`
 #'
 #' @param object Object of type `bartmodel` containing draws of a BART model and associated sampling outputs.
 #' @param term Name of the parameter to extract (e.g., `"sigma2"`, `"y_hat_train"`, etc.)
@@ -3647,6 +4044,14 @@ extractParameter.bartmodel <- function(object, term) {
       return(object$cloglog_cutpoint_samples)
     } else {
       stop("This model does not have ordinal cutpoint samples")
+    }
+  }
+
+  if (term %in% c("negbin_dispersion", "dispersion")) {
+    if (!is.null(object$negbin_dispersion_samples)) {
+      return(object$negbin_dispersion_samples)
+    } else {
+      stop("This model does not have negative-binomial dispersion samples")
     }
   }
 
@@ -3786,6 +4191,30 @@ saveBARTModelToJson <- function(object) {
         )
       }
     }
+  }
+  if (identical(object$model_params$outcome_model$outcome, "count")) {
+    jsonobj$add_boolean("has_offset", isTRUE(object$model_params$has_offset))
+    jsonobj$add_scalar(
+      "negbin_dispersion_prior_shape",
+      object$model_params$negbin_dispersion_prior_shape
+    )
+    jsonobj$add_scalar(
+      "negbin_dispersion_prior_rate",
+      object$model_params$negbin_dispersion_prior_rate
+    )
+    jsonobj$add_scalar(
+      "negbin_dispersion_init",
+      object$model_params$negbin_dispersion_init
+    )
+    jsonobj$add_boolean(
+      "sample_negbin_dispersion",
+      isTRUE(object$model_params$sample_negbin_dispersion)
+    )
+    jsonobj$add_vector(
+      "negbin_dispersion_samples",
+      object$negbin_dispersion_samples,
+      "parameters"
+    )
   }
   if (object$model_params$sample_sigma2_global) {
     jsonobj$add_vector(
@@ -4065,6 +4494,15 @@ createBARTModelFromJson <- function(json_object) {
     model_params[["cloglog_num_categories"]] <- 0
   }
 
+  if (identical(model_params[["outcome_model"]]$outcome, "count")) {
+    negbin_fields <- .loadBartNegbinFieldsFromJson(
+      list(json_object),
+      model_params,
+      output
+    )
+    model_params <- negbin_fields$model_params
+    output <- negbin_fields$output
+  }
   output[["model_params"]] <- model_params
 
   # Unpack sampled parameters
@@ -4412,6 +4850,15 @@ createBARTModelFromCombinedJson <- function(json_object_list) {
       model_params[["num_samples"]] <- model_params[["num_samples"]] +
         json_object$get_scalar("num_samples")
     }
+  }
+  if (identical(model_params[["outcome_model"]]$outcome, "count")) {
+    negbin_fields <- .loadBartNegbinFieldsFromJson(
+      json_object_list,
+      model_params,
+      output
+    )
+    model_params <- negbin_fields$model_params
+    output <- negbin_fields$output
   }
   output[["model_params"]] <- model_params
 
@@ -4772,6 +5219,15 @@ createBARTModelFromCombinedJsonString <- function(json_string_list) {
       model_params[["num_samples"]] <- model_params[["num_samples"]] +
         json_object$get_scalar("num_samples")
     }
+  }
+  if (identical(model_params[["outcome_model"]]$outcome, "count")) {
+    negbin_fields <- .loadBartNegbinFieldsFromJson(
+      json_object_list,
+      model_params,
+      output
+    )
+    model_params <- negbin_fields$model_params
+    output <- negbin_fields$output
   }
   output[["model_params"]] <- model_params
 

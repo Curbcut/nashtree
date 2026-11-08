@@ -480,6 +480,10 @@ bcf <- function(
   ) {
     link_is_cloglog <- TRUE
     outcome_is_ordinal <- TRUE
+  } else if (outcome_model$outcome == "count") {
+    stop(
+      "The count (negative-binomial) outcome is currently available in bart() only, not bcf()"
+    )
   } else {
     stop(paste0(
       "Invalid outcome model specification, outcome = ",
