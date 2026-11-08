@@ -989,13 +989,27 @@ sampleBARTPosteriorPredictive <- function(
     # Zero-inflated family: a structural zero with probability pi, drawn
     # after the negative-binomial draws so that family = "negbin" is unchanged
     if (identical(model_object$model_params$outcome_model$family, "zinb")) {
-      pi_draws <- predict(
-        model_object,
-        X = X,
-        type = "posterior",
-        terms = "zero_forest",
-        scale = "zero_probability"
-      )
+      pi_draws <- if (isTRUE(model_object$model_params$has_zero_rfx)) {
+        # pi includes the zero-part random effects of the rows' groups
+        predict(
+          model_object,
+          X = X,
+          leaf_basis = leaf_basis,
+          rfx_group_ids = rfx_group_ids,
+          rfx_basis = rfx_basis,
+          type = "posterior",
+          terms = "y_hat",
+          scale = "zero_probability"
+        )
+      } else {
+        predict(
+          model_object,
+          X = X,
+          type = "posterior",
+          terms = "zero_forest",
+          scale = "zero_probability"
+        )
+      }
       structural <- runif(length(ppd_vector)) < as.numeric(pi_draws)
       ppd_vector[structural] <- 0
     }

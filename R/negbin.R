@@ -273,7 +273,34 @@
       function(js) js$get_vector("sigma2_leaf_zero_samples", "parameters")
     ))
   }
+  zero_rfx <- .readZeroRfxFlags(json_object_list)
+  model_params[["has_zero_rfx"]] <- zero_rfx
+  if (zero_rfx) {
+    output[["zero_rfx_samples"]] <- .loadZeroRfxSamplesFromJson(json_object_list)
+  }
   list(model_params = model_params, output = output)
+}
+
+# Whether the zero part of a list of zero-inflated JSON objects (one per chain
+# or model) carries random effects. Models saved before zero-part random
+# effects existed have no has_zero_rfx field and none.
+.readZeroRfxFlags <- function(json_object_list) {
+  flags <- vapply(json_object_list, function(js) {
+    json_contains_field_cpp(js$json_ptr, "has_zero_rfx") &&
+      js$get_boolean("has_zero_rfx")
+  }, logical(1))
+  if (length(unique(flags)) > 1) {
+    stop(
+      "Cannot combine zero-inflated models with and without zero-part random effects"
+    )
+  }
+  flags[1]
+}
+
+# Zero-part random effects of a zero-inflated BART or BCF model: written after
+# the count part's random effects, so they are random_effect_container_1
+.loadZeroRfxSamplesFromJson <- function(json_object_list) {
+  loadRandomEffectSamplesCombinedJson(json_object_list, 1)
 }
 
 # Column indices of X_train a forest may split on, from keep / drop lists of
