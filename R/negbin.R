@@ -259,6 +259,14 @@
   model_params[["sigma2_leaf_zero_init"]] <- json_default$get_scalar(
     "sigma2_leaf_zero_init"
   )
+  sampled <- vapply(json_object_list, function(js) {
+    js$get_boolean("sample_sigma2_leaf_zero")
+  }, logical(1))
+  if (length(unique(sampled)) > 1) {
+    stop(
+      "Cannot combine zero-inflated models that differ in zero_forest_params$sample_sigma2_leaf"
+    )
+  }
   if (isTRUE(model_params[["sample_sigma2_leaf_zero"]])) {
     output[["sigma2_leaf_zero_samples"]] <- unlist(lapply(
       json_object_list,
