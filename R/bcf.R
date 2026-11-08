@@ -2755,8 +2755,8 @@ bcf <- function(
             sample_counter
           ] <- leaf_scale_tau_double
         }
-        forest_model_config_mu$update_leaf_model_scale(
-          current_leaf_scale_mu
+        forest_model_config_tau$update_leaf_model_scale(
+          current_leaf_scale_tau
         )
       }
 
