@@ -128,6 +128,7 @@ NULL
 #'   - `probit_outcome_model` Deprecated in favor of `outcome_model`. Whether or not the outcome should be modeled as explicitly binary via a probit link. If `TRUE`, `y` must only contain the values `0` and `1`. Default: `FALSE`.
 #'   - `num_threads` Number of threads to use in the GFR and MCMC algorithms, as well as prediction. Defaults to `1` (single-threaded). Set to `-1` to use the maximum number of available threads, or a positive integer for a specific count. OpenMP must be available for values other than `1`.
 #'   - `negbin_dispersion_prior_shape`, `negbin_dispersion_prior_rate`, `negbin_dispersion_init`, `sample_negbin_dispersion` Count outcomes only: the `Gamma(shape, rate)` prior on the negative-binomial size `r` (defaults `1` and `0.01`), its starting value (method of moments, or the constant-rate ZINB fit, if `NULL`) and whether to sample it (default `TRUE`), as in [bart()].
+#'   - `zero_random_effects` Zero-inflated count outcomes with `rfx_group_ids_train` only. Whether the zero part gets its own random effects on the same groups and basis as the count part (see "Count outcomes"). `FALSE` gives the model without them, draw for draw. Default: `TRUE`.
 #'
 #' @param prognostic_forest_params (Optional) A list of prognostic forest model parameters, each of which has a default value processed internally, so this argument list is optional.
 #'
@@ -213,13 +214,19 @@ NULL
 #' With `family = "zinb"` a zero part is added: `pi_i = Phi(c0 + mu_z(X_i, pi_hat_i) + tau_z(X_i) Z_i)` is the
 #' probability of a structural zero, with a probit prognostic forest `mu_z` and a probit treatment forest
 #' `tau_z` (four forests in all), sampled on the structural-zero indicators as in [bart()]; structural zeros
-#' drop out of the count part through infinite variance weights. The zero part has no random effects, no
-#' intercept `tau_0` and no adaptive coding, and a multivariate treatment is refused. `observation_weights` are
+#' drop out of the count part through infinite variance weights. The zero part has no intercept `tau_0` and
+#' no adaptive coding, and a multivariate treatment is refused. With `rfx_group_ids_train` it gets random
+#' effects of its own (unless `general_params$zero_random_effects = FALSE`): the count part's groups, basis
+#' (`model_spec`) and priors, separate parameters, sampled after the zero forests on the zero part's latent
+#' residual with unit variance, and entering `pi` everywhere, as in [bart()]. As for the count part, group
+#' labels not seen in training are refused. `observation_weights` are
 #' refused with this family (with `family = "negbin"` they multiply the variance weights).
 #'
 #' `y_hat_train` holds draws of `log(mu)` including the offset, `mu_hat_train` of `c + mu(X)`, `tau_hat_train` of
 #' the log rate ratio. The zero-inflated family adds `zero_mu_hat_train` (`c0 + mu_z(X)`), `zero_tau_hat_train`
-#' (`tau_z(X)`, probit scale) and `zero_hat_train` (the full probit index), and their test-set versions.
+#' (`tau_z(X)`, probit scale) and `zero_hat_train` (the full probit index, zero-part random effects included),
+#' and their test-set versions; with zero-part random effects also `zero_rfx_samples`, `zero_rfx_preds_train`
+#' and `zero_rfx_preds_test`.
 #' [predict.bcfmodel()] offers the scales `"linear"`, `"rate"`, `"response"` (`(1 - pi) mu`) and `"zero_probability"`,
 #' [computeContrastBCFModel()] contrasts on those scales, and [sampleBCFPosteriorPredictive()] draws counts.
 #'
@@ -4196,7 +4203,7 @@ bcf <- function(
 #' that were not in the training set.
 #' @param rfx_basis (Optional) Test set basis for "random-slope" regression in additive random effects model. If the model was sampled with a random effects `model_spec` of "intercept_only" or "intercept_plus_treatment", this is optional, but if it is provided, it will be used.
 #' @param type (Optional) Type of prediction to return. Options are "mean", which averages the predictions from every draw of a BCF model, and "posterior", which returns the entire matrix of posterior predictions. Default: "posterior".
-#' @param terms (Optional) Which model terms to include in the prediction. Options include `"y_hat"`, `"prognostic_function"`, `"mu"`, `"cate"`, `"tau"`, `"rfx"`, `"variance_forest"`, `"zero_prognostic"`, `"zero_tau"`, `"zero_forest"` (zero-inflated count models), or `"all"`.
+#' @param terms (Optional) Which model terms to include in the prediction. Options include `"y_hat"`, `"prognostic_function"`, `"mu"`, `"cate"`, `"tau"`, `"rfx"`, `"variance_forest"`, `"zero_prognostic"`, `"zero_tau"`, `"zero_forest"`, `"zero_rfx"` (zero-inflated count models), or `"all"`.
 #'
 #'   The treatment effect terms follow a three-level hierarchy:
 #'   \itemize{
@@ -4208,7 +4215,7 @@ bcf <- function(
 #'   Similarly for the prognostic term: `"mu"` returns the prognostic forest only, while `"prognostic_function"` additionally folds in the random intercept when `rfx_model_spec` is `"intercept_only"` or `"intercept_plus_treatment"`; otherwise the two are identical.
 #'
 #'   If a model doesn't have random effects or variance forest predictions but one of those terms is requested, the request will simply be ignored. If none of the requested terms are present, this function will return `NULL` along with a warning. Default: `"all"`.
-#' @param scale (Optional) Scale of mean function predictions. Options are "linear", which returns predictions on the original scale of the mean forest / RFX terms, and "probability", which transforms predictions into a probability of observing `y == 1`. "probability" is only valid for models fit with a probit outcome model. For count models, "linear" returns the log scale (`y_hat` is `log(mu)` with the offset, `mu` / `prognostic_function` are log baseline rates, `tau` / `cate` log rate ratios), "rate" exponentiates every term (`mu`, baseline rates, rate ratios, multiplicative random effects), and "response" is "rate" except that `y_hat` is the mean `(1 - pi) mu` for a zero-inflated model. For zero-inflated models, "zero_probability" returns `pi` as `y_hat` and the zero-part terms only. The zero-part terms `"zero_prognostic"` (`c0 + mu_z(X)`), `"zero_tau"` (`tau_z(X)`) and `"zero_forest"` (the full index) are probit indices on the "linear" scale; on the other scales `"zero_prognostic"` and `"zero_forest"` are probabilities and `"zero_tau"` stays a probit-scale coefficient. Default: "linear".
+#' @param scale (Optional) Scale of mean function predictions. Options are "linear", which returns predictions on the original scale of the mean forest / RFX terms, and "probability", which transforms predictions into a probability of observing `y == 1`. "probability" is only valid for models fit with a probit outcome model. For count models, "linear" returns the log scale (`y_hat` is `log(mu)` with the offset, `mu` / `prognostic_function` are log baseline rates, `tau` / `cate` log rate ratios), "rate" exponentiates every term (`mu`, baseline rates, rate ratios, multiplicative random effects), and "response" is "rate" except that `y_hat` is the mean `(1 - pi) mu` for a zero-inflated model. For zero-inflated models, "zero_probability" returns `pi` as `y_hat` and the zero-part terms only. The zero-part terms `"zero_prognostic"` (`c0 + mu_z(X)`), `"zero_tau"` (`tau_z(X)`) and `"zero_forest"` (the forests' full index `c0 + mu_z(X) + tau_z(X) Z`) are probit indices on the "linear" scale; on the other scales `"zero_prognostic"` and `"zero_forest"` are probabilities and `"zero_tau"` stays a probit-scale coefficient. `"zero_rfx"` (models with zero-part random effects) is the zero part's random effect, on the probit scale on every scale; `pi` (and so `y_hat` on the "response" and "zero_probability" scales) includes it. Default: "linear".
 #' @param offset (Optional) Count models only. Log-scale offset of length `nrow(X)`, added to `y_hat`. If the model was fit with an offset and none is given, an offset of 0 is used with a warning. Default: `NULL`.
 #' @param ... (Optional) Other prediction parameters.
 #'

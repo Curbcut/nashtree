@@ -113,6 +113,7 @@ Default: \code{NULL}.}
 \item \code{probit_outcome_model} Deprecated in favor of \code{outcome_model}. Whether or not the outcome should be modeled as explicitly binary via a probit link. If \code{TRUE}, \code{y} must only contain the values \code{0} and \code{1}. Default: \code{FALSE}.
 \item \code{num_threads} Number of threads to use in the GFR and MCMC algorithms, as well as prediction. Defaults to \code{1} (single-threaded). Set to \code{-1} to use the maximum number of available threads, or a positive integer for a specific count. OpenMP must be available for values other than \code{1}.
 \item \code{negbin_dispersion_prior_shape}, \code{negbin_dispersion_prior_rate}, \code{negbin_dispersion_init}, \code{sample_negbin_dispersion} Count outcomes only: the \code{Gamma(shape, rate)} prior on the negative-binomial size \code{r} (defaults \code{1} and \code{0.01}), its starting value (method of moments, or the constant-rate ZINB fit, if \code{NULL}) and whether to sample it (default \code{TRUE}), as in \code{\link[=bart]{bart()}}.
+\item \code{zero_random_effects} Zero-inflated count outcomes with \code{rfx_group_ids_train} only. Whether the zero part gets its own random effects on the same groups and basis as the count part (see "Count outcomes"). \code{FALSE} gives the model without them, draw for draw. Default: \code{TRUE}.
 }}
 
 \item{prognostic_forest_params}{(Optional) A list of prognostic forest model parameters, each of which has a default value processed internally, so this argument list is optional.
@@ -213,13 +214,19 @@ precision weights \code{omega_i}. \code{r} is drawn by slice sampling as in \cod
 With \code{family = "zinb"} a zero part is added: \verb{pi_i = Phi(c0 + mu_z(X_i, pi_hat_i) + tau_z(X_i) Z_i)} is the
 probability of a structural zero, with a probit prognostic forest \code{mu_z} and a probit treatment forest
 \code{tau_z} (four forests in all), sampled on the structural-zero indicators as in \code{\link[=bart]{bart()}}; structural zeros
-drop out of the count part through infinite variance weights. The zero part has no random effects, no
-intercept \code{tau_0} and no adaptive coding, and a multivariate treatment is refused. \code{observation_weights} are
+drop out of the count part through infinite variance weights. The zero part has no intercept \code{tau_0} and
+no adaptive coding, and a multivariate treatment is refused. With \code{rfx_group_ids_train} it gets random
+effects of its own (unless \code{general_params$zero_random_effects = FALSE}): the count part's groups, basis
+(\code{model_spec}) and priors, separate parameters, sampled after the zero forests on the zero part's latent
+residual with unit variance, and entering \code{pi} everywhere, as in \code{\link[=bart]{bart()}}. As for the count part, group
+labels not seen in training are refused. \code{observation_weights} are
 refused with this family (with \code{family = "negbin"} they multiply the variance weights).
 
 \code{y_hat_train} holds draws of \code{log(mu)} including the offset, \code{mu_hat_train} of \code{c + mu(X)}, \code{tau_hat_train} of
 the log rate ratio. The zero-inflated family adds \code{zero_mu_hat_train} (\code{c0 + mu_z(X)}), \code{zero_tau_hat_train}
-(\code{tau_z(X)}, probit scale) and \code{zero_hat_train} (the full probit index), and their test-set versions.
+(\code{tau_z(X)}, probit scale) and \code{zero_hat_train} (the full probit index, zero-part random effects included),
+and their test-set versions; with zero-part random effects also \code{zero_rfx_samples}, \code{zero_rfx_preds_train}
+and \code{zero_rfx_preds_test}.
 \code{\link[=predict.bcfmodel]{predict.bcfmodel()}} offers the scales \code{"linear"}, \code{"rate"}, \code{"response"} (\verb{(1 - pi) mu}) and \code{"zero_probability"},
 \code{\link[=computeContrastBCFModel]{computeContrastBCFModel()}} contrasts on those scales, and \code{\link[=sampleBCFPosteriorPredictive]{sampleBCFPosteriorPredictive()}} draws counts.
 }

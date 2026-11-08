@@ -158,6 +158,7 @@ NULL
 #'   - `negbin_dispersion_prior_rate` Count outcomes only. Rate `b0` of the same prior. Default: `0.01`, so the default prior is exponential with mean 100 and allows near-Poisson data.
 #'   - `negbin_dispersion_init` Count outcomes only. Starting value of `r`. Defaults to a method-of-moments estimate around the constant-rate fit, clamped to `[0.1, 1000]`.
 #'   - `sample_negbin_dispersion` Count outcomes only. Whether to sample `r`. If `FALSE`, `r` stays at `negbin_dispersion_init`. Default: `TRUE`.
+#'   - `zero_random_effects` Zero-inflated count outcomes with `rfx_group_ids_train` only. Whether the zero part gets its own random effects on the same groups and basis as the count part (see "Zero-inflated count outcomes"). `FALSE` gives the model without them, draw for draw. Default: `TRUE`.
 #'   - `probit_outcome_model` Deprecated in favor of `outcome_model`. Whether or not the outcome should be modeled as explicitly binary via a probit link. If `TRUE`, `y` must only contain the values `0` and `1`. Default: `FALSE`.
 #'   - `num_threads` Number of threads to use in the GFR and MCMC algorithms, as well as prediction. Defaults to `1` (single-threaded). Set to `-1` to use the maximum number of available threads, or a positive integer for a specific count. OpenMP must be available for values other than `1`.
 #'
@@ -237,8 +238,18 @@ NULL
 #' variance weight, so `1 / w_i = 0` and they add nothing to the leaf sufficient statistics, to the
 #' leaf marginal likelihoods or to the random-effects conditional; a leaf that holds only such rows
 #' has a finite marginal likelihood equal to its prior and its value is drawn from the leaf prior;
-#' (4) draws `r` from its conditional over the rows with `s_i = 0`; and (5) samples random effects, which
-#' enter the count part only (the zero part has no random effects).
+#' (4) draws `r` from its conditional over the rows with `s_i = 0`; and (5) samples the count part's
+#' random effects.
+#'
+#' With `rfx_group_ids_train`, the zero part also gets random effects (unless
+#' `general_params$zero_random_effects = FALSE`): `pi_i = Phi(c0 + g(X_i) + w_i' v_{k(i)})`, with the
+#' basis `w_i` of the count part (a column of ones for `model_spec = "intercept_only"`), the same groups
+#' and the same `random_effects_params` priors, but parameters `v` of their own. They are sampled right
+#' after the zero forest, on the zero part's latent residual `z_i - c0 - g(X_i)` with unit variance (no
+#' Pólya-Gamma weights), and enter `pi` everywhere: the draw of `s`, the latent step, `zero_hat_train`
+#' and `zero_hat_test`, `predict()`, the posterior predictive and the serialized model (a second
+#' random-effects container). Groups not seen in training follow `random_effects_params$unseen_groups`
+#' on both parts.
 #'
 #' `min_samples_leaf` of the count forest counts all rows of a leaf, structural zeros included, so a
 #' count-forest leaf may hold fewer than `min_samples_leaf` rows that inform it. The bound is a guard
@@ -254,10 +265,13 @@ NULL
 #' `sigma2_leaf_init = 2 / num_trees`, and is held fixed unless `zero_forest_params$sample_sigma2_leaf = TRUE`.
 #' `observation_weights` are not supported with this family.
 #'
-#' The output adds `zero_forests`, `zero_hat_train` and `zero_hat_test` (draws of the probit index
-#' `c0 + g(X)`, so `pnorm(zero_hat_train)` are draws of `pi`). `predict()` offers the scales `"linear"`
-#' (`log(mu)`), `"rate"` (`mu`), `"zero_probability"` (`pi`) and `"response"` (`(1 - pi) mu`, the mean
-#' of `y`), and the term `"zero_forest"`. [sampleBARTPosteriorPredictive()] includes the zero mass.
+#' The output adds `zero_forests`, `zero_hat_train` and `zero_hat_test` (draws of the full probit index
+#' `c0 + g(X)` plus any zero-part random effects, so `pnorm(zero_hat_train)` are draws of `pi`) and, with
+#' zero-part random effects, `zero_rfx_samples`, `zero_rfx_preds_train` and `zero_rfx_preds_test`.
+#' `predict()` offers the scales `"linear"` (`log(mu)`), `"rate"` (`mu`), `"zero_probability"` (`pi`) and
+#' `"response"` (`(1 - pi) mu`, the mean of `y`), and the terms `"zero_forest"` (`c0 + g(X)`) and
+#' `"zero_rfx"` (the zero-part random effects, on the probit scale on every prediction scale).
+#' [sampleBARTPosteriorPredictive()] includes the zero mass.
 #'
 #' @return List of sampling outputs and a wrapper around the sampled forests (which can be used for in-memory prediction on new data, or serialized to JSON on disk).
 #' @export
@@ -3603,8 +3617,8 @@ bart <- function(
 #' that were not in the training set.
 #' @param rfx_basis (Optional) Test set basis for "random-slope" regression in additive random effects model.
 #' @param type (Optional) Type of prediction to return. Options are "mean", which averages the predictions from every draw of a BART model, and "posterior", which returns the entire matrix of posterior predictions. Default: "posterior".
-#' @param terms (Optional) Which model terms to include in the prediction. This can be a single term or a list of model terms. Options include "y_hat", "mean_forest", "rfx", "variance_forest", "zero_forest" (zero-inflated count models), or "all". If a model doesn't have mean forest, random effects, or variance forest predictions, but one of those terms is request, the request will simply be ignored. If none of the requested terms are present in a model, this function will return `NULL` along with a warning. Default: "all".
-#' @param scale (Optional) Scale of mean function predictions. Options are "linear", which returns predictions on the original scale of the mean forest / RFX terms, "probability", which transforms predictions into class probabilities for models with discrete outcomes, and "class", which returns predicted outcome categories for discrete outcome models. "probability" is only valid for outcome models with `outcome == 'binary'` or `outcome == 'ordinal'`. For binary outcomes, this will return the probability that `y == 1`, and for ordinal outcomes, this will return probabilities for each outcome label. For count (negative-binomial) models, "linear" returns the log rate `eta = offset + c + f(X) [+ rfx]`, "rate" returns `mu = exp(eta)`, and "response" is an alias of "rate"; on the "rate" scale the mean-forest term is `exp(c + f(X))` and the random-effects term is the multiplicative rate ratio `exp(rfx)`. "rate" and "response" are only valid for count models, and "probability" and "class" are not valid for them. For zero-inflated count models (`family = "zinb"`), "linear" and "rate" describe the count part as above, "response" returns the mean `(1 - pi) * mu`, and "zero_probability" returns the structural-zero probability `pi = Phi(c0 + g(X))` (only the "y_hat" and "zero_forest" terms are defined on that scale, and "all" is narrowed to them); the "zero_forest" term is the probit index `c0 + g(X)` on the "linear" scale and `pi` on the other scales. With `type = "mean"`, transformed draws are averaged, so "rate" gives the posterior mean of `mu`. Default: "linear".
+#' @param terms (Optional) Which model terms to include in the prediction. This can be a single term or a list of model terms. Options include "y_hat", "mean_forest", "rfx", "variance_forest", "zero_forest" and "zero_rfx" (zero-inflated count models), or "all". If a model doesn't have mean forest, random effects, or variance forest predictions, but one of those terms is request, the request will simply be ignored. If none of the requested terms are present in a model, this function will return `NULL` along with a warning. Default: "all".
+#' @param scale (Optional) Scale of mean function predictions. Options are "linear", which returns predictions on the original scale of the mean forest / RFX terms, "probability", which transforms predictions into class probabilities for models with discrete outcomes, and "class", which returns predicted outcome categories for discrete outcome models. "probability" is only valid for outcome models with `outcome == 'binary'` or `outcome == 'ordinal'`. For binary outcomes, this will return the probability that `y == 1`, and for ordinal outcomes, this will return probabilities for each outcome label. For count (negative-binomial) models, "linear" returns the log rate `eta = offset + c + f(X) [+ rfx]`, "rate" returns `mu = exp(eta)`, and "response" is an alias of "rate"; on the "rate" scale the mean-forest term is `exp(c + f(X))` and the random-effects term is the multiplicative rate ratio `exp(rfx)`. "rate" and "response" are only valid for count models, and "probability" and "class" are not valid for them. For zero-inflated count models (`family = "zinb"`), "linear" and "rate" describe the count part as above, "response" returns the mean `(1 - pi) * mu`, and "zero_probability" returns the structural-zero probability `pi = Phi(c0 + g(X) [+ zero-part rfx])` (only the "y_hat", "zero_forest" and "zero_rfx" terms are defined on that scale, and "all" is narrowed to them); the "zero_forest" term is the forest's probit index `c0 + g(X)` on the "linear" scale and `Phi(c0 + g(X))` on the other scales, and the "zero_rfx" term (models with zero-part random effects) is the zero-part random effect on the probit scale on every scale. With zero-part random effects, `rfx_group_ids` are needed for "y_hat" on the "response" and "zero_probability" scales. With `type = "mean"`, transformed draws are averaged, so "rate" gives the posterior mean of `mu`. Default: "linear".
 #' @param offset (Optional) Count models only. Log-scale offset of length `nrow(X)` added to the linear predictor, as `offset_train` in [bart()]. If the model was fit with an offset and none is given here, an offset of 0 (unit exposure) is used with a warning. Default: `NULL`.
 #' @param ... (Optional) Other prediction parameters.
 #'
