@@ -169,3 +169,45 @@ correlation >= 0.952, log-rate RMSE <= 0.219, pi correlation >= 0.934, pi RMSE
 interval 31 / 32. Plain NB on the same data: rate correlation 0.82-0.85,
 log-rate RMSE 0.70-0.76. **Timing** (n = 5,000, 200 count trees, ms per
 iteration): Gaussian 9.8, NB 30.3, ZINB 28.9 with 50 zero trees (27.2 with 20).
+
+## Count outcomes in bcf() (0.4.6.9011)
+
+Branch `cma-bcf-count`, on `cma-zinb`. `bcf()` accepts
+`OutcomeModel("count", "log")` and `family = "zinb"`.
+
+**Count part.** `log mu_i = o_i + c + mu_c(x_i, pi_hat_i) + [tau_0 + tau_c(x_i)] b(z_i) [+ rfx]`,
+`b(z)` the treatment basis (`z` or the adaptive coding). The Pólya-Gamma step
+(`bcf_negbin_latent_update` in `R/bcf.R`) writes the pseudo-outcome
+`(y - r) / (2 omega) + log r - o` into `resid_train` (the role the latent `z`
+plays for probit) and variance weights `1 / omega` into the forest and rfx
+datasets; the forests, rfx, GFR and chains then run unchanged. `tau_0` and the
+adaptive-coding parameters are sampled in R from unweighted sums in the
+Gaussian path, so the count path recomputes them with the precision weights
+`omega` (the Gaussian and probit paths are untouched). Variance forests and
+`sample_sigma2_global = TRUE` are refused. Priors: prognostic leaf scale as in
+NB BART; treatment forest `sigma2_leaf = log_rate_ratio_prior_sd^2 / num_trees`
+(default sd 0.5 on the log-rate-ratio scale); `tau_0 ~ N(0, 1)`.
+
+**Zero part** (`zinb`): probit prognostic forest (50 trees, leaf scale
+`2 / m`) and treatment forest on the raw `z` (25 trees, probit-BCF calibration
+with `delta_max = 0.5`), both on the structural-zero indicators shared with
+bart(); no rfx, no intercept, no adaptive coding, univariate treatment only.
+JSON forests: mu, tau, zero mu, zero tau (`forest_0`..`forest_3`).
+
+**Recovery** (n = 3,000, confounded binary treatment, offset, 8 seeds per
+family): average log rate ratio error <= 0.060 (naive 0.18-0.38), 95% coverage
+15 / 16, CATE RMSE <= 0.104, r in 99% interval 16 / 16; zinb tau_z error
+<= 0.063 (8 / 8 covered), effect on pi error <= 0.020. **Timing** (n = 5,000,
+default 250 + 100 trees, ms per iteration): Gaussian 30.4, NB 63.9, ZINB 68.1.
+
+Found and left unchanged (pre-existing, upstream code):
+
+- Probit BCF with `sample_intercept = TRUE` (the default) omits `tau_0 b(z)`
+  from both the truncated-normal mean and the residual handed to the forests
+  in the latent step, so the forests partly absorb `tau_0`. The count path
+  includes it.
+- In the GFR loop, sampling the treatment-forest leaf scale updates the
+  prognostic forest's config with the prognostic scale
+  (`forest_model_config_mu$update_leaf_model_scale(current_leaf_scale_mu)`);
+  the MCMC loop is correct.
+- The Gaussian `tau_0` and adaptive-coding updates ignore `observation_weights`.
