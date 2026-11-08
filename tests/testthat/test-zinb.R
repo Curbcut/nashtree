@@ -523,7 +523,8 @@ test_that("Zero-inflated count inputs are validated", {
   expect_null(nb_zero)
   expect_error(
     bcf(d$X, Z_train = rbinom(60, 1, 0.5), y_train = d$y, propensity_train = rep(0.5, 60),
-      num_gfr = 0, num_mcmc = 2, general_params = list(outcome_model = zinb_model())),
-    "bart\\(\\) only"
+      num_gfr = 0, num_mcmc = 2, general_params = list(outcome_model = zinb_model()),
+      variance_forest_params = list(num_trees = 5)),
+    "variance forest"
   )
 })

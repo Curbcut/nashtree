@@ -160,8 +160,7 @@ validate_outcome_model <- function(object) {
 #'   augmentation. `OutcomeModel("count", "log", family = "zinb")` adds a
 #'   probit zero part: with probability `pi = Phi(g(X))` the observation is a
 #'   structural zero, otherwise it is drawn from the negative binomial. See the
-#'   "Count outcomes" section of [bart()]. Count outcomes are not available in
-#'   [bcf()].
+#'   "Count outcomes" sections of [bart()] and [bcf()].
 #'
 #' @return An object of class `outcome_model`.
 #' @export
