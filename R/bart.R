@@ -158,6 +158,7 @@ NULL
 #'   - `negbin_dispersion_prior_rate` Count outcomes only. Rate `b0` of the same prior. Default: `0.01`, so the default prior is exponential with mean 100 and allows near-Poisson data.
 #'   - `negbin_dispersion_init` Count outcomes only. Starting value of `r`. Defaults to a method-of-moments estimate around the constant-rate fit, clamped to `[0.1, 1000]`.
 #'   - `sample_negbin_dispersion` Count outcomes only. Whether to sample `r`. If `FALSE`, `r` stays at `negbin_dispersion_init`. Default: `TRUE`.
+#'   - `zero_random_effects` Zero-inflated count outcomes with `rfx_group_ids_train` only. Whether the zero part gets its own random effects on the same groups and basis as the count part (see "Zero-inflated count outcomes"). `FALSE` gives the model without them, draw for draw. Default: `TRUE`.
 #'   - `probit_outcome_model` Deprecated in favor of `outcome_model`. Whether or not the outcome should be modeled as explicitly binary via a probit link. If `TRUE`, `y` must only contain the values `0` and `1`. Default: `FALSE`.
 #'   - `num_threads` Number of threads to use in the GFR and MCMC algorithms, as well as prediction. Defaults to `1` (single-threaded). Set to `-1` to use the maximum number of available threads, or a positive integer for a specific count. OpenMP must be available for values other than `1`.
 #'
@@ -237,8 +238,18 @@ NULL
 #' variance weight, so `1 / w_i = 0` and they add nothing to the leaf sufficient statistics, to the
 #' leaf marginal likelihoods or to the random-effects conditional; a leaf that holds only such rows
 #' has a finite marginal likelihood equal to its prior and its value is drawn from the leaf prior;
-#' (4) draws `r` from its conditional over the rows with `s_i = 0`; and (5) samples random effects, which
-#' enter the count part only (the zero part has no random effects).
+#' (4) draws `r` from its conditional over the rows with `s_i = 0`; and (5) samples the count part's
+#' random effects.
+#'
+#' With `rfx_group_ids_train`, the zero part also gets random effects (unless
+#' `general_params$zero_random_effects = FALSE`): `pi_i = Phi(c0 + g(X_i) + w_i' v_{k(i)})`, with the
+#' basis `w_i` of the count part (a column of ones for `model_spec = "intercept_only"`), the same groups
+#' and the same `random_effects_params` priors, but parameters `v` of their own. They are sampled right
+#' after the zero forest, on the zero part's latent residual `z_i - c0 - g(X_i)` with unit variance (no
+#' Pólya-Gamma weights), and enter `pi` everywhere: the draw of `s`, the latent step, `zero_hat_train`
+#' and `zero_hat_test`, `predict()`, the posterior predictive and the serialized model (a second
+#' random-effects container). Groups not seen in training follow `random_effects_params$unseen_groups`
+#' on both parts.
 #'
 #' `min_samples_leaf` of the count forest counts all rows of a leaf, structural zeros included, so a
 #' count-forest leaf may hold fewer than `min_samples_leaf` rows that inform it. The bound is a guard
@@ -254,10 +265,13 @@ NULL
 #' `sigma2_leaf_init = 2 / num_trees`, and is held fixed unless `zero_forest_params$sample_sigma2_leaf = TRUE`.
 #' `observation_weights` are not supported with this family.
 #'
-#' The output adds `zero_forests`, `zero_hat_train` and `zero_hat_test` (draws of the probit index
-#' `c0 + g(X)`, so `pnorm(zero_hat_train)` are draws of `pi`). `predict()` offers the scales `"linear"`
-#' (`log(mu)`), `"rate"` (`mu`), `"zero_probability"` (`pi`) and `"response"` (`(1 - pi) mu`, the mean
-#' of `y`), and the term `"zero_forest"`. [sampleBARTPosteriorPredictive()] includes the zero mass.
+#' The output adds `zero_forests`, `zero_hat_train` and `zero_hat_test` (draws of the full probit index
+#' `c0 + g(X)` plus any zero-part random effects, so `pnorm(zero_hat_train)` are draws of `pi`) and, with
+#' zero-part random effects, `zero_rfx_samples`, `zero_rfx_preds_train` and `zero_rfx_preds_test`.
+#' `predict()` offers the scales `"linear"` (`log(mu)`), `"rate"` (`mu`), `"zero_probability"` (`pi`) and
+#' `"response"` (`(1 - pi) mu`, the mean of `y`), and the terms `"zero_forest"` (`c0 + g(X)`) and
+#' `"zero_rfx"` (the zero-part random effects, on the probit scale on every prediction scale).
+#' [sampleBARTPosteriorPredictive()] includes the zero mass.
 #'
 #' @return List of sampling outputs and a wrapper around the sampled forests (which can be used for in-memory prediction on new data, or serialized to JSON on disk).
 #' @export
@@ -336,7 +350,8 @@ bart <- function(
     negbin_dispersion_prior_shape = 1,
     negbin_dispersion_prior_rate = 0.01,
     negbin_dispersion_init = NULL,
-    sample_negbin_dispersion = TRUE
+    sample_negbin_dispersion = TRUE,
+    zero_random_effects = TRUE
   )
   general_params_updated <- preprocessParams(
     general_params_default,
@@ -444,6 +459,7 @@ bart <- function(
   negbin_dispersion_prior_rate <- general_params_updated$negbin_dispersion_prior_rate
   negbin_dispersion_init <- general_params_updated$negbin_dispersion_init
   sample_negbin_dispersion <- general_params_updated$sample_negbin_dispersion
+  zero_random_effects <- general_params_updated$zero_random_effects
 
   # 2. Mean forest parameters
   num_trees_mean <- mean_forest_params_updated$num_trees
@@ -587,6 +603,13 @@ bart <- function(
     stop(
       "zero_forest_params is only used by zero-inflated count outcomes (OutcomeModel('count', 'log', family = 'zinb'))"
     )
+  }
+  if (
+    !is.logical(zero_random_effects) ||
+      length(zero_random_effects) != 1 ||
+      is.na(zero_random_effects)
+  ) {
+    stop("general_params$zero_random_effects must be TRUE or FALSE")
   }
 
   # Count (negative-binomial) outcome: validate before changing RNG state
@@ -827,6 +850,13 @@ bart <- function(
       )
     }
     previous_leaf_var_zero_samples <- previous_bart_model$sigma2_leaf_zero_samples
+    previous_zero_rfx_samples <- if (
+      isTRUE(previous_bart_model$model_params$has_zero_rfx)
+    ) {
+      previous_bart_model$zero_rfx_samples
+    } else {
+      NULL
+    }
     if (previous_bart_model$model_params$outcome_model$link == "cloglog") {
       previous_cloglog_cutpoint_samples <- previous_bart_model$cloglog_cutpoint_samples
       previous_cloglog_num_categories <- previous_bart_model$cloglog_num_categories
@@ -854,6 +884,7 @@ bart <- function(
     previous_negbin_dispersion_samples <- NULL
     previous_forest_samples_zero <- NULL
     previous_leaf_var_zero_samples <- NULL
+    previous_zero_rfx_samples <- NULL
   }
 
   # Determine whether conditional mean, variance, or both will be modeled
@@ -1325,6 +1356,9 @@ bart <- function(
       )
     }
   }
+  # Zero-inflated family: the zero part gets its own random effects on the
+  # same groups and basis unless general_params$zero_random_effects = FALSE
+  has_zero_rfx <- outcome_is_zinb && has_rfx && zero_random_effects
   if (has_rfx_test) {
     if (rfx_model_spec == "custom") {
       if (is.null(rfx_basis_test)) {
@@ -1955,6 +1989,35 @@ bart <- function(
     )
   }
 
+  # Zero-part random effects: same groups, basis and priors as the count
+  # part, sampled on the probit latent residual of the zero part with unit
+  # variance (no Polya-Gamma weights)
+  if (has_zero_rfx) {
+    zero_rfx_dataset_train <- createRandomEffectsDataset(
+      rfx_group_ids_train,
+      rfx_basis_train
+    )
+    zero_rfx_tracker_train <- createRandomEffectsTracker(rfx_group_ids_train)
+    zero_rfx_model <- createRandomEffectsModel(
+      num_rfx_components,
+      num_rfx_groups
+    )
+    rootResetRandomEffectsModel(
+      zero_rfx_model,
+      alpha_init,
+      xi_init,
+      sigma_alpha_init,
+      sigma_xi_init,
+      sigma_xi_shape,
+      sigma_xi_scale
+    )
+    zero_rfx_samples <- createRandomEffectSamples(
+      num_rfx_components,
+      num_rfx_groups,
+      zero_rfx_tracker_train
+    )
+  }
+
   # Container of parameter samples
   num_actual_mcmc_iter <- num_mcmc * keep_every
   num_samples <- num_gfr + num_burnin + num_actual_mcmc_iter
@@ -2220,6 +2283,13 @@ bart <- function(
       eta_count <- negbin_offset_train + y_bar_train + forest_pred + rfx_pred
       zero_pred <- active_forest_zero$predict(forest_dataset_zero)
       eta_zero <- zero_outcome_mean + zero_pred
+      if (has_zero_rfx) {
+        zero_rfx_pred <- zero_rfx_model$predict(
+          zero_rfx_dataset_train,
+          zero_rfx_tracker_train
+        )
+        eta_zero <- eta_zero + zero_rfx_pred
+      }
       s <- .zinbSampleStructuralZeros(
         negbin_y,
         eta_count,
@@ -2229,7 +2299,11 @@ bart <- function(
       # Albert and Chib latent z_i ~ N(eta_zero_i, 1) truncated to the side
       # given by s_i, as the probit outcome does
       z <- .probitLatentDraw(eta_zero, s)
-      outcome_zero$update_data(z - zero_outcome_mean - zero_pred)
+      if (has_zero_rfx) {
+        outcome_zero$update_data(z - zero_outcome_mean - zero_pred - zero_rfx_pred)
+      } else {
+        outcome_zero$update_data(z - zero_outcome_mean - zero_pred)
+      }
       forest_model_zero$sample_one_iteration(
         forest_dataset = forest_dataset_zero,
         residual = outcome_zero,
@@ -2259,6 +2333,19 @@ bart <- function(
         }
         forest_model_config_zero$update_leaf_model_scale(
           as.matrix(leaf_scale_zero)
+        )
+      }
+      # Zero-part random effects on the latent residual z - c0 - g(X) - u,
+      # with the latent error variance fixed at 1
+      if (has_zero_rfx) {
+        zero_rfx_model$sample_random_effect(
+          zero_rfx_dataset_train,
+          outcome_zero,
+          zero_rfx_tracker_train,
+          zero_rfx_samples,
+          keep_sample,
+          1.0,
+          rng
         )
       }
       current_structural_zero <<- s
@@ -2581,6 +2668,21 @@ bart <- function(
               as.matrix(leaf_scale_zero_samples[forest_ind + 1])
             )
           }
+          if (has_zero_rfx) {
+            resetRandomEffectsModel(
+              zero_rfx_model,
+              zero_rfx_samples,
+              forest_ind,
+              sigma_alpha_init
+            )
+            resetRandomEffectsTracker(
+              zero_rfx_tracker_train,
+              zero_rfx_model,
+              zero_rfx_dataset_train,
+              outcome_zero,
+              zero_rfx_samples
+            )
+          }
         }
       } else if (has_prev_model) {
         warmstart_index <- ifelse(
@@ -2732,6 +2834,42 @@ bart <- function(
               as.matrix(previous_leaf_var_zero_samples[warmstart_index])
             )
           }
+          if (has_zero_rfx) {
+            if (is.null(previous_zero_rfx_samples)) {
+              warning(
+                "`previous_model_json` did not have any zero-part random effects samples, so the zero-part RFX sampler will be run from scratch while the forests and any other parameters are warm started"
+              )
+              rootResetRandomEffectsModel(
+                zero_rfx_model,
+                alpha_init,
+                xi_init,
+                sigma_alpha_init,
+                sigma_xi_init,
+                sigma_xi_shape,
+                sigma_xi_scale
+              )
+              rootResetRandomEffectsTracker(
+                zero_rfx_tracker_train,
+                zero_rfx_model,
+                zero_rfx_dataset_train,
+                outcome_zero
+              )
+            } else {
+              resetRandomEffectsModel(
+                zero_rfx_model,
+                previous_zero_rfx_samples,
+                warmstart_index - 1,
+                sigma_alpha_init
+              )
+              resetRandomEffectsTracker(
+                zero_rfx_tracker_train,
+                zero_rfx_model,
+                zero_rfx_dataset_train,
+                outcome_zero,
+                zero_rfx_samples
+              )
+            }
+          }
         }
       } else {
         if (include_mean_forest) {
@@ -2829,6 +2967,23 @@ bart <- function(
           if (sample_sigma2_leaf_zero) {
             forest_model_config_zero$update_leaf_model_scale(
               as.matrix(sigma2_leaf_zero_init)
+            )
+          }
+          if (has_zero_rfx) {
+            rootResetRandomEffectsModel(
+              zero_rfx_model,
+              alpha_init,
+              xi_init,
+              sigma_alpha_init,
+              sigma_xi_init,
+              sigma_xi_shape,
+              sigma_xi_scale
+            )
+            rootResetRandomEffectsTracker(
+              zero_rfx_tracker_train,
+              zero_rfx_model,
+              zero_rfx_dataset_train,
+              outcome_zero
             )
           }
         }
@@ -3101,6 +3256,9 @@ bart <- function(
       if (has_rfx) {
         rfx_samples$delete_sample(0)
       }
+      if (has_zero_rfx) {
+        zero_rfx_samples$delete_sample(0)
+      }
     }
     if (include_mean_forest && !importance_only) {
       mean_forest_pred_train <- mean_forest_pred_train[,
@@ -3208,6 +3366,24 @@ bart <- function(
         zero_outcome_mean
     }
   }
+  # Zero-part random effects enter the probit index on both sets
+  if (has_zero_rfx) {
+    zero_rfx_preds_train <- zero_rfx_samples$predict(
+      rfx_group_ids_train,
+      rfx_basis_train
+    )
+    zero_hat_train <- zero_hat_train + zero_rfx_preds_train
+    if (has_rfx_test && has_test) {
+      zero_rfx_preds_test <- predictRandomEffectsForLabels(
+        zero_rfx_samples,
+        group_ids_factor_test,
+        rfx_basis_test,
+        unseen_groups = rfx_unseen_groups,
+        label = "rfx_group_ids_test"
+      )
+      zero_hat_test <- zero_hat_test + zero_rfx_preds_test
+    }
+  }
 
   # Global error variance
   if (sample_sigma2_global) {
@@ -3307,6 +3483,7 @@ bart <- function(
     model_params[["num_trees_zero"]] <- num_trees_zero
     model_params[["sample_sigma2_leaf_zero"]] <- isTRUE(sample_sigma2_leaf_zero)
     model_params[["sigma2_leaf_zero_init"]] <- as.numeric(sigma2_leaf_zero_init)
+    model_params[["has_zero_rfx"]] <- has_zero_rfx
   }
   result <- list(
     "model_params" = model_params,
@@ -3344,6 +3521,13 @@ bart <- function(
     }
     if (sample_sigma2_leaf_zero) {
       result[["sigma2_leaf_zero_samples"]] = leaf_scale_zero_samples
+    }
+    if (has_zero_rfx) {
+      result[["zero_rfx_samples"]] = zero_rfx_samples
+      result[["zero_rfx_preds_train"]] = zero_rfx_preds_train
+      if (has_rfx_test && has_test) {
+        result[["zero_rfx_preds_test"]] = zero_rfx_preds_test
+      }
     }
   }
   if (has_rfx) {
@@ -3403,6 +3587,9 @@ bart <- function(
   if (has_rfx) {
     rm(rfx_dataset_train, rfx_tracker_train, rfx_model)
   }
+  if (has_zero_rfx) {
+    rm(zero_rfx_dataset_train, zero_rfx_tracker_train, zero_rfx_model)
+  }
   rm(outcome_train)
   rm(rng)
 
@@ -3430,8 +3617,8 @@ bart <- function(
 #' that were not in the training set.
 #' @param rfx_basis (Optional) Test set basis for "random-slope" regression in additive random effects model.
 #' @param type (Optional) Type of prediction to return. Options are "mean", which averages the predictions from every draw of a BART model, and "posterior", which returns the entire matrix of posterior predictions. Default: "posterior".
-#' @param terms (Optional) Which model terms to include in the prediction. This can be a single term or a list of model terms. Options include "y_hat", "mean_forest", "rfx", "variance_forest", "zero_forest" (zero-inflated count models), or "all". If a model doesn't have mean forest, random effects, or variance forest predictions, but one of those terms is request, the request will simply be ignored. If none of the requested terms are present in a model, this function will return `NULL` along with a warning. Default: "all".
-#' @param scale (Optional) Scale of mean function predictions. Options are "linear", which returns predictions on the original scale of the mean forest / RFX terms, "probability", which transforms predictions into class probabilities for models with discrete outcomes, and "class", which returns predicted outcome categories for discrete outcome models. "probability" is only valid for outcome models with `outcome == 'binary'` or `outcome == 'ordinal'`. For binary outcomes, this will return the probability that `y == 1`, and for ordinal outcomes, this will return probabilities for each outcome label. For count (negative-binomial) models, "linear" returns the log rate `eta = offset + c + f(X) [+ rfx]`, "rate" returns `mu = exp(eta)`, and "response" is an alias of "rate"; on the "rate" scale the mean-forest term is `exp(c + f(X))` and the random-effects term is the multiplicative rate ratio `exp(rfx)`. "rate" and "response" are only valid for count models, and "probability" and "class" are not valid for them. For zero-inflated count models (`family = "zinb"`), "linear" and "rate" describe the count part as above, "response" returns the mean `(1 - pi) * mu`, and "zero_probability" returns the structural-zero probability `pi = Phi(c0 + g(X))` (only the "y_hat" and "zero_forest" terms are defined on that scale, and "all" is narrowed to them); the "zero_forest" term is the probit index `c0 + g(X)` on the "linear" scale and `pi` on the other scales. With `type = "mean"`, transformed draws are averaged, so "rate" gives the posterior mean of `mu`. Default: "linear".
+#' @param terms (Optional) Which model terms to include in the prediction. This can be a single term or a list of model terms. Options include "y_hat", "mean_forest", "rfx", "variance_forest", "zero_forest" and "zero_rfx" (zero-inflated count models), or "all". If a model doesn't have mean forest, random effects, or variance forest predictions, but one of those terms is request, the request will simply be ignored. If none of the requested terms are present in a model, this function will return `NULL` along with a warning. Default: "all".
+#' @param scale (Optional) Scale of mean function predictions. Options are "linear", which returns predictions on the original scale of the mean forest / RFX terms, "probability", which transforms predictions into class probabilities for models with discrete outcomes, and "class", which returns predicted outcome categories for discrete outcome models. "probability" is only valid for outcome models with `outcome == 'binary'` or `outcome == 'ordinal'`. For binary outcomes, this will return the probability that `y == 1`, and for ordinal outcomes, this will return probabilities for each outcome label. For count (negative-binomial) models, "linear" returns the log rate `eta = offset + c + f(X) [+ rfx]`, "rate" returns `mu = exp(eta)`, and "response" is an alias of "rate"; on the "rate" scale the mean-forest term is `exp(c + f(X))` and the random-effects term is the multiplicative rate ratio `exp(rfx)`. "rate" and "response" are only valid for count models, and "probability" and "class" are not valid for them. For zero-inflated count models (`family = "zinb"`), "linear" and "rate" describe the count part as above, "response" returns the mean `(1 - pi) * mu`, and "zero_probability" returns the structural-zero probability `pi = Phi(c0 + g(X) [+ zero-part rfx])` (only the "y_hat", "zero_forest" and "zero_rfx" terms are defined on that scale, and "all" is narrowed to them); the "zero_forest" term is the forest's probit index `c0 + g(X)` on the "linear" scale and `Phi(c0 + g(X))` on the other scales, and the "zero_rfx" term (models with zero-part random effects) is the zero-part random effect on the probit scale on every scale. With zero-part random effects, `rfx_group_ids` are needed for "y_hat" on the "response" and "zero_probability" scales. With `type = "mean"`, transformed draws are averaged, so "rate" gives the posterior mean of `mu`. Default: "linear".
 #' @param offset (Optional) Count models only. Log-scale offset of length `nrow(X)` added to the linear predictor, as `offset_train` in [bart()]. If the model was fit with an offset and none is given here, an offset of 0 (unit exposure) is used with a warning. Default: `NULL`.
 #' @param ... (Optional) Other prediction parameters.
 #'
@@ -3551,6 +3738,7 @@ predict.bartmodel <- function(
   has_variance_forest <- object$model_params$include_variance_forest
   has_rfx <- object$model_params$has_rfx
   has_zero_forest <- is_zinb
+  has_zero_rfx <- is_zinb && isTRUE(object$model_params$has_zero_rfx)
   has_y_hat <- has_mean_forest || has_rfx
   predict_y_hat <- (((has_y_hat) && ("y_hat" %in% terms)) ||
     ((has_y_hat) && ("all" %in% terms)))
@@ -3563,12 +3751,14 @@ predict.bartmodel <- function(
     ((has_variance_forest) && ("all" %in% terms)))
   predict_zero_forest <- has_zero_forest &&
     (("zero_forest" %in% terms) || ("all" %in% terms))
+  predict_zero_rfx <- has_zero_rfx &&
+    (("zero_rfx" %in% terms) || ("all" %in% terms))
   if (zero_probability_scale) {
-    # On the zero-probability scale only y_hat (= pi) and the zero forest are
-    # defined; "all" is narrowed to those two terms
+    # On the zero-probability scale only y_hat (= pi), the zero forest and the
+    # zero-part random effects are defined; "all" is narrowed to those terms
     if (any(c("mean_forest", "rfx") %in% terms)) {
       stop(
-        "scale = 'zero_probability' is only defined for the 'y_hat' and 'zero_forest' terms"
+        "scale = 'zero_probability' is only defined for the 'y_hat', 'zero_forest' and 'zero_rfx' terms"
       )
     }
     predict_mean_forest <- FALSE
@@ -3579,7 +3769,8 @@ predict.bartmodel <- function(
     predict_mean_forest,
     predict_rfx,
     predict_variance_forest,
-    predict_zero_forest
+    predict_zero_forest,
+    predict_zero_rfx
   ))
   if (predict_count == 0) {
     warning(paste0(
@@ -3596,6 +3787,8 @@ predict.bartmodel <- function(
   # The zero part enters y_hat on the "response" and "zero_probability" scales
   predict_zero_forest_intermediate <- predict_y_hat && is_zinb &&
     (scale %in% c("response", "zero_probability"))
+  predict_zero_rfx_intermediate <- predict_zero_forest_intermediate &&
+    has_zero_rfx
   if (class_scale) {
     if (!((predict_count == 1) && (predict_y_hat))) {
       stop("Class scale can only be used with y_hat predictions")
@@ -3624,7 +3817,9 @@ predict.bartmodel <- function(
     leaf_basis <- as.matrix(leaf_basis)
   }
   if ((is.null(dim(rfx_basis))) && (!is.null(rfx_basis))) {
-    if (predict_rfx) rfx_basis <- as.matrix(rfx_basis)
+    if (predict_rfx || predict_zero_rfx || predict_zero_rfx_intermediate) {
+      rfx_basis <- as.matrix(rfx_basis)
+    }
   }
 
   # Data checks
@@ -3643,6 +3838,21 @@ predict.bartmodel <- function(
     stop(
       "Random effect group labels (rfx_group_ids) must be provided for this model"
     )
+  }
+  if (
+    (predict_zero_rfx || predict_zero_rfx_intermediate) &&
+      is.null(rfx_group_ids)
+  ) {
+    stop(
+      "Random effect group labels (rfx_group_ids) must be provided for this model: its zero part has random effects"
+    )
+  }
+  if (
+    (predict_zero_rfx || predict_zero_rfx_intermediate) &&
+      is.null(rfx_basis) &&
+      !rfx_intercept
+  ) {
+    stop("Random effects basis (rfx_basis) must be provided for this model")
   }
   if ((predict_rfx) && (is.null(rfx_basis)) && (!rfx_intercept)) {
     stop("Random effects basis (rfx_basis) must be provided for this model")
@@ -3770,6 +3980,21 @@ predict.bartmodel <- function(
       } else {
         pnorm(zero_forest_linear)
       }
+    }
+  }
+
+  # Zero-part random effects, on the probit scale on every prediction scale;
+  # they shift the probit index of pi (unseen groups follow the model's
+  # unseen-group policy, as the count part does)
+  if (predict_zero_rfx || predict_zero_rfx_intermediate) {
+    zero_rfx_predictions <- predictRandomEffectsForLabels(
+      object$zero_rfx_samples,
+      group_ids_factor,
+      rfx_basis,
+      unseen_groups = rfx_unseen_groups
+    )
+    if (predict_zero_rfx_intermediate) {
+      zero_forest_linear <- zero_forest_linear + zero_rfx_predictions
     }
   }
 
@@ -3930,6 +4155,9 @@ predict.bartmodel <- function(
     if (predict_zero_forest) {
       zero_forest_predictions <- rowMeans(zero_forest_predictions)
     }
+    if (predict_zero_rfx) {
+      zero_rfx_predictions <- rowMeans(zero_rfx_predictions)
+    }
     if (predict_y_hat) {
       if (is_ordinal_cloglog && probability_scale) {
         y_hat <- apply(y_hat, c(1, 2), mean)
@@ -3959,6 +4187,8 @@ predict.bartmodel <- function(
       return(variance_forest_predictions)
     } else if (predict_zero_forest) {
       return(zero_forest_predictions)
+    } else if (predict_zero_rfx) {
+      return(zero_rfx_predictions)
     }
   } else {
     result <- list()
@@ -3984,6 +4214,9 @@ predict.bartmodel <- function(
     }
     if (predict_zero_forest) {
       result[["zero_forest_predictions"]] = zero_forest_predictions
+    }
+    if (predict_zero_rfx) {
+      result[["zero_rfx_predictions"]] = zero_rfx_predictions
     }
     return(result)
   }
@@ -4015,6 +4248,9 @@ print.bartmodel <- function(x, ...) {
   }
   if (identical(x$model_params$outcome_model$family, "zinb")) {
     model_terms <- c(model_terms, "zero forest")
+    if (isTRUE(x$model_params$has_zero_rfx)) {
+      model_terms <- c(model_terms, "zero-part random effects")
+    }
   }
   if (isTRUE(x$model_params$sample_negbin_dispersion)) {
     model_terms <- c(model_terms, "negative-binomial dispersion model")
@@ -4066,7 +4302,9 @@ print.bartmodel <- function(x, ...) {
       ifelse(isTRUE(x$model_params$has_offset), " with an offset", ""),
       " and a probit zero part (",
       x$model_params$num_trees_zero,
-      " trees)"
+      " trees",
+      ifelse(isTRUE(x$model_params$has_zero_rfx), " and random effects", ""),
+      ")"
     )
   } else if (identical(outcome_model$outcome, "count")) {
     outcome_model_summary <- paste0(
@@ -4803,6 +5041,10 @@ saveBARTModelToJson <- function(object) {
           "parameters"
         )
       }
+      jsonobj$add_boolean(
+        "has_zero_rfx",
+        isTRUE(object$model_params$has_zero_rfx)
+      )
     }
     jsonobj$add_boolean("has_offset", isTRUE(object$model_params$has_offset))
     jsonobj$add_scalar(
@@ -4849,6 +5091,11 @@ saveBARTModelToJson <- function(object) {
       "rfx_unique_group_ids",
       object$rfx_unique_group_ids
     )
+  }
+  # Zero-part random effects (zero-inflated family): the second random
+  # effects container, random_effect_container_1
+  if (isTRUE(object$model_params$has_zero_rfx)) {
+    jsonobj$add_random_effects(object$zero_rfx_samples)
   }
 
   # Add covariate preprocessor metadata

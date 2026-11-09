@@ -57,6 +57,8 @@ small_zinb_data <- function(seed = 3, n = 300, n_test = 50) {
   )
 }
 
+# The zero part has no random effects here (general_params$zero_random_effects
+# = FALSE), as before they existed; test-zinb-rfx.R covers them.
 fit_small_zinb <- function(d, seed, num_chains = 1, num_gfr = 5, ...) {
   bart(
     d$X, d$y, X_test = d$X_test,
@@ -65,7 +67,7 @@ fit_small_zinb <- function(d, seed, num_chains = 1, num_gfr = 5, ...) {
     random_effects_params = list(model_spec = "intercept_only"),
     num_gfr = num_gfr, num_burnin = 10, num_mcmc = 20,
     general_params = list(outcome_model = zinb_model(), random_seed = seed,
-      num_chains = num_chains),
+      num_chains = num_chains, zero_random_effects = FALSE),
     zero_forest_params = list(num_trees = 20, ...)
   )
 }
@@ -453,7 +455,8 @@ test_that("ZINB multi-chain sampling, combined JSON and warm starts have the rig
     random_effects_params = list(model_spec = "intercept_only"),
     previous_model_json = saveBARTModelToJsonString(m3),
     previous_model_warmstart_sample_num = 60,
-    general_params = list(outcome_model = zinb_model(), random_seed = 14),
+    general_params = list(outcome_model = zinb_model(), random_seed = 14,
+      zero_random_effects = FALSE),
     zero_forest_params = list(num_trees = 20, sample_sigma2_leaf = TRUE))
   expect_equal(dim(warm$zero_hat_train), c(300, 5))
   expect_error(

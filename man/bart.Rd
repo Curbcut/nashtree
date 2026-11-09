@@ -101,6 +101,7 @@ referred to internally in the C++ layer as "variance weights" (\code{var_weights
 \item \code{negbin_dispersion_prior_rate} Count outcomes only. Rate \code{b0} of the same prior. Default: \code{0.01}, so the default prior is exponential with mean 100 and allows near-Poisson data.
 \item \code{negbin_dispersion_init} Count outcomes only. Starting value of \code{r}. Defaults to a method-of-moments estimate around the constant-rate fit, clamped to \verb{[0.1, 1000]}.
 \item \code{sample_negbin_dispersion} Count outcomes only. Whether to sample \code{r}. If \code{FALSE}, \code{r} stays at \code{negbin_dispersion_init}. Default: \code{TRUE}.
+\item \code{zero_random_effects} Zero-inflated count outcomes with \code{rfx_group_ids_train} only. Whether the zero part gets its own random effects on the same groups and basis as the count part (see "Zero-inflated count outcomes"). \code{FALSE} gives the model without them, draw for draw. Default: \code{TRUE}.
 \item \code{probit_outcome_model} Deprecated in favor of \code{outcome_model}. Whether or not the outcome should be modeled as explicitly binary via a probit link. If \code{TRUE}, \code{y} must only contain the values \code{0} and \code{1}. Default: \code{FALSE}.
 \item \code{num_threads} Number of threads to use in the GFR and MCMC algorithms, as well as prediction. Defaults to \code{1} (single-threaded). Set to \code{-1} to use the maximum number of available threads, or a positive integer for a specific count. OpenMP must be available for values other than \code{1}.
 }}
@@ -239,8 +240,18 @@ forest by the Pólya-Gamma step on the rows with \code{s_i = 0} only: rows with 
 variance weight, so \code{1 / w_i = 0} and they add nothing to the leaf sufficient statistics, to the
 leaf marginal likelihoods or to the random-effects conditional; a leaf that holds only such rows
 has a finite marginal likelihood equal to its prior and its value is drawn from the leaf prior;
-(4) draws \code{r} from its conditional over the rows with \code{s_i = 0}; and (5) samples random effects, which
-enter the count part only (the zero part has no random effects).
+(4) draws \code{r} from its conditional over the rows with \code{s_i = 0}; and (5) samples the count part's
+random effects.
+
+With \code{rfx_group_ids_train}, the zero part also gets random effects (unless
+\code{general_params$zero_random_effects = FALSE}): \verb{pi_i = Phi(c0 + g(X_i) + w_i' v_{k(i)})}, with the
+basis \code{w_i} of the count part (a column of ones for \code{model_spec = "intercept_only"}), the same groups
+and the same \code{random_effects_params} priors, but parameters \code{v} of their own. They are sampled right
+after the zero forest, on the zero part's latent residual \code{z_i - c0 - g(X_i)} with unit variance (no
+Pólya-Gamma weights), and enter \code{pi} everywhere: the draw of \code{s}, the latent step, \code{zero_hat_train}
+and \code{zero_hat_test}, \code{predict()}, the posterior predictive and the serialized model (a second
+random-effects container). Groups not seen in training follow \code{random_effects_params$unseen_groups}
+on both parts.
 
 \code{min_samples_leaf} of the count forest counts all rows of a leaf, structural zeros included, so a
 count-forest leaf may hold fewer than \code{min_samples_leaf} rows that inform it. The bound is a guard
@@ -256,10 +267,13 @@ fit. The zero-forest leaf scale follows the probit calibration of Chipman, Georg
 \code{sigma2_leaf_init = 2 / num_trees}, and is held fixed unless \code{zero_forest_params$sample_sigma2_leaf = TRUE}.
 \code{observation_weights} are not supported with this family.
 
-The output adds \code{zero_forests}, \code{zero_hat_train} and \code{zero_hat_test} (draws of the probit index
-\code{c0 + g(X)}, so \code{pnorm(zero_hat_train)} are draws of \code{pi}). \code{predict()} offers the scales \code{"linear"}
-(\code{log(mu)}), \code{"rate"} (\code{mu}), \code{"zero_probability"} (\code{pi}) and \code{"response"} (\verb{(1 - pi) mu}, the mean
-of \code{y}), and the term \code{"zero_forest"}. \code{\link[=sampleBARTPosteriorPredictive]{sampleBARTPosteriorPredictive()}} includes the zero mass.
+The output adds \code{zero_forests}, \code{zero_hat_train} and \code{zero_hat_test} (draws of the full probit index
+\code{c0 + g(X)} plus any zero-part random effects, so \code{pnorm(zero_hat_train)} are draws of \code{pi}) and, with
+zero-part random effects, \code{zero_rfx_samples}, \code{zero_rfx_preds_train} and \code{zero_rfx_preds_test}.
+\code{predict()} offers the scales \code{"linear"} (\code{log(mu)}), \code{"rate"} (\code{mu}), \code{"zero_probability"} (\code{pi}) and
+\code{"response"} (\verb{(1 - pi) mu}, the mean of \code{y}), and the terms \code{"zero_forest"} (\code{c0 + g(X)}) and
+\code{"zero_rfx"} (the zero-part random effects, on the probit scale on every prediction scale).
+\code{\link[=sampleBARTPosteriorPredictive]{sampleBARTPosteriorPredictive()}} includes the zero mass.
 }
 
 \examples{
