@@ -2029,6 +2029,19 @@ bcf <- function(
     prior_var_tau0 <- diag(p_tau0) * tau_0_prior_var
   }
 
+  # Precision weights 1 / v_i for the tau_0 and adaptive-coding updates done
+  # in R, matching the C++ leaf statistics, which read the forest dataset's
+  # variance weights v_i as variance multipliers. A count outcome set
+  # current_precision above and its Polya-Gamma step updates it every
+  # iteration; a Gaussian outcome uses its observation_weights; NULL (no
+  # weights, or probit) keeps the unweighted sums.
+  if (!link_is_log) {
+    current_precision <- NULL
+    if (!is.null(observation_weights) && !link_is_probit) {
+      current_precision <- 1 / as.numeric(observation_weights)
+    }
+  }
+
   # Data. A count outcome always carries variance weights (1 / omega), which
   # the Polya-Gamma step overwrites every iteration.
   forest_dataset_train <- createForestDataset(
@@ -2558,18 +2571,15 @@ bcf <- function(
               rfx_model$predict(rfx_dataset_train, rfx_tracker_train)
             )
         }
-        Ztr_tau0 <- t(Z_basis_mat) %*% as.matrix(partial_resid_tau0)
-        ZtZ_current <- crossprod(Z_basis_mat)
-        if (link_is_log) {
-          # Polya-Gamma precision weights (0 for structural zeros)
-          Ztr_tau0 <- t(Z_basis_mat) %*%
-            as.matrix(current_precision * partial_resid_tau0)
-          ZtZ_current <- crossprod(Z_basis_mat * sqrt(current_precision))
-        }
-        Sigma_post <- solve(
-          ZtZ_current / current_sigma2 + diag(p_tau0) / tau_0_prior_var
+        tau_0_post <- bcf_tau_0_posterior(
+          Z_basis_mat,
+          partial_resid_tau0,
+          current_precision,
+          current_sigma2,
+          tau_0_prior_var
         )
-        mu_post_tau0 <- as.numeric(Sigma_post %*% Ztr_tau0 / current_sigma2)
+        Sigma_post <- tau_0_post$cov
+        mu_post_tau0 <- tau_0_post$mean
         if (p_tau0 == 1) {
           tau_0_new <- rnorm(1, mu_post_tau0, sqrt(as.numeric(Sigma_post)))
         } else {
@@ -2638,28 +2648,16 @@ bcf <- function(
         } else {
           tau_x_raw_train
         }
-        s_tt0 <- sum(tau_x_for_coding * tau_x_for_coding * (Z_train == 0))
-        s_tt1 <- sum(tau_x_for_coding * tau_x_for_coding * (Z_train == 1))
-        s_ty0 <- sum(
-          tau_x_for_coding * partial_resid_mu_train * (Z_train == 0)
+        coding_stats <- bcf_coding_suff_stats(
+          tau_x_for_coding,
+          partial_resid_mu_train,
+          Z_train,
+          current_precision
         )
-        s_ty1 <- sum(
-          tau_x_for_coding * partial_resid_mu_train * (Z_train == 1)
-        )
-
-        if (link_is_log) {
-          # Polya-Gamma precision weights (0 for structural zeros)
-          s_tt0 <- sum(current_precision * tau_x_for_coding^2 * (Z_train == 0))
-          s_tt1 <- sum(current_precision * tau_x_for_coding^2 * (Z_train == 1))
-          s_ty0 <- sum(
-            current_precision * tau_x_for_coding * partial_resid_mu_train *
-              (Z_train == 0)
-          )
-          s_ty1 <- sum(
-            current_precision * tau_x_for_coding * partial_resid_mu_train *
-              (Z_train == 1)
-          )
-        }
+        s_tt0 <- coding_stats$s_tt0
+        s_tt1 <- coding_stats$s_tt1
+        s_ty0 <- coding_stats$s_ty0
+        s_ty1 <- coding_stats$s_ty1
 
         # Sample b0 (coefficient on tau_total(X)(1-Z)) and b1 (coefficient on tau_total(X)Z)
         current_b_0 <- rnorm(
@@ -2755,8 +2753,8 @@ bcf <- function(
             sample_counter
           ] <- leaf_scale_tau_double
         }
-        forest_model_config_mu$update_leaf_model_scale(
-          current_leaf_scale_mu
+        forest_model_config_tau$update_leaf_model_scale(
+          current_leaf_scale_tau
         )
       }
 
@@ -3374,18 +3372,15 @@ bcf <- function(
                 rfx_model$predict(rfx_dataset_train, rfx_tracker_train)
               )
           }
-          Ztr_tau0 <- t(Z_basis_mat) %*% as.matrix(partial_resid_tau0)
-          ZtZ_current <- crossprod(Z_basis_mat)
-          if (link_is_log) {
-            # Polya-Gamma precision weights (0 for structural zeros)
-            Ztr_tau0 <- t(Z_basis_mat) %*%
-              as.matrix(current_precision * partial_resid_tau0)
-            ZtZ_current <- crossprod(Z_basis_mat * sqrt(current_precision))
-          }
-          Sigma_post <- solve(
-            ZtZ_current / current_sigma2 + diag(p_tau0) / tau_0_prior_var
+          tau_0_post <- bcf_tau_0_posterior(
+            Z_basis_mat,
+            partial_resid_tau0,
+            current_precision,
+            current_sigma2,
+            tau_0_prior_var
           )
-          mu_post_tau0 <- as.numeric(Sigma_post %*% Ztr_tau0 / current_sigma2)
+          Sigma_post <- tau_0_post$cov
+          mu_post_tau0 <- tau_0_post$mean
           if (p_tau0 == 1) {
             tau_0_new <- rnorm(1, mu_post_tau0, sqrt(as.numeric(Sigma_post)))
           } else {
@@ -3454,36 +3449,16 @@ bcf <- function(
           } else {
             tau_x_raw_train
           }
-          s_tt0 <- sum(
-            tau_x_for_coding * tau_x_for_coding * (Z_train == 0)
+          coding_stats <- bcf_coding_suff_stats(
+            tau_x_for_coding,
+            partial_resid_mu_train,
+            Z_train,
+            current_precision
           )
-          s_tt1 <- sum(
-            tau_x_for_coding * tau_x_for_coding * (Z_train == 1)
-          )
-          s_ty0 <- sum(
-            tau_x_for_coding *
-              partial_resid_mu_train *
-              (Z_train == 0)
-          )
-          s_ty1 <- sum(
-            tau_x_for_coding *
-              partial_resid_mu_train *
-              (Z_train == 1)
-          )
-
-          if (link_is_log) {
-            # Polya-Gamma precision weights (0 for structural zeros)
-            s_tt0 <- sum(current_precision * tau_x_for_coding^2 * (Z_train == 0))
-            s_tt1 <- sum(current_precision * tau_x_for_coding^2 * (Z_train == 1))
-            s_ty0 <- sum(
-              current_precision * tau_x_for_coding * partial_resid_mu_train *
-                (Z_train == 0)
-            )
-            s_ty1 <- sum(
-              current_precision * tau_x_for_coding * partial_resid_mu_train *
-                (Z_train == 1)
-            )
-          }
+          s_tt0 <- coding_stats$s_tt0
+          s_tt1 <- coding_stats$s_tt1
+          s_ty0 <- coding_stats$s_ty0
+          s_ty1 <- coding_stats$s_ty1
 
           # Sample b0 (coefficient on tau_total(X)(1-Z)) and b1 (coefficient on tau_total(X)Z)
           current_b_0 <- rnorm(
@@ -7248,4 +7223,70 @@ createBCFModelFromCombinedJsonString <- function(json_string_list) {
 
   class(output) <- "bcfmodel"
   return(output)
+}
+
+#' Conditional posterior of the treatment intercept tau_0 in bcf()
+#'
+#' Given the forests, `partial_resid = basis %*% tau_0 + e` with
+#' `e_i ~ N(0, sigma2 / precision_i)` and prior `tau_0 ~ N(0, prior_var I)`, so
+#' `tau_0 | - ~ N(Sigma Z'W r / sigma2, Sigma)` with
+#' `Sigma = (Z'W Z / sigma2 + I / prior_var)^-1` and `W = diag(precision)`.
+#' `precision = NULL` means unit weights and keeps the unweighted arithmetic.
+#'
+#' @param basis Treatment basis matrix (n x p).
+#' @param partial_resid Outcome net of every other mean term (length n).
+#' @param precision Per-row precision weights (1 / variance multiplier), or `NULL`.
+#' @param sigma2 Current global error variance.
+#' @param prior_var Prior variance of each element of tau_0.
+#' @return List with the posterior `mean` (length p) and covariance `cov` (p x p).
+#' @noRd
+bcf_tau_0_posterior <- function(
+  basis,
+  partial_resid,
+  precision,
+  sigma2,
+  prior_var
+) {
+  if (is.null(precision)) {
+    Ztr <- t(basis) %*% as.matrix(partial_resid)
+    ZtZ <- crossprod(basis)
+  } else {
+    Ztr <- t(basis) %*% as.matrix(precision * partial_resid)
+    ZtZ <- crossprod(basis * sqrt(precision))
+  }
+  cov <- solve(ZtZ / sigma2 + diag(ncol(basis)) / prior_var)
+  list(mean = as.numeric(cov %*% Ztr / sigma2), cov = cov)
+}
+
+#' Sufficient statistics of the adaptive-coding update in bcf()
+#'
+#' The coding parameters `b_0`, `b_1` are the coefficients of the regression of
+#' `partial_resid` on `tau_x (1 - Z)` and `tau_x Z`, with errors
+#' `N(0, sigma2 / precision_i)`. Returns the (precision-weighted) sums of
+#' squares `s_tt0`, `s_tt1` and cross products `s_ty0`, `s_ty1` within the
+#' control and treated rows. `precision = NULL` means unit weights and keeps
+#' the unweighted arithmetic.
+#'
+#' @param tau_x Treatment effect per row (`tau_0 + tau(X)` when tau_0 is sampled).
+#' @param partial_resid Outcome net of the prognostic forest (and random effects).
+#' @param Z Binary treatment (length n).
+#' @param precision Per-row precision weights (1 / variance multiplier), or `NULL`.
+#' @return List with `s_tt0`, `s_tt1`, `s_ty0`, `s_ty1`.
+#' @noRd
+bcf_coding_suff_stats <- function(tau_x, partial_resid, Z, precision) {
+  if (is.null(precision)) {
+    list(
+      s_tt0 = sum(tau_x * tau_x * (Z == 0)),
+      s_tt1 = sum(tau_x * tau_x * (Z == 1)),
+      s_ty0 = sum(tau_x * partial_resid * (Z == 0)),
+      s_ty1 = sum(tau_x * partial_resid * (Z == 1))
+    )
+  } else {
+    list(
+      s_tt0 = sum(precision * tau_x^2 * (Z == 0)),
+      s_tt1 = sum(precision * tau_x^2 * (Z == 1)),
+      s_ty0 = sum(precision * tau_x * partial_resid * (Z == 0)),
+      s_ty1 = sum(precision * tau_x * partial_resid * (Z == 1))
+    )
+  }
 }
