@@ -1,5 +1,23 @@
 # nashtree 0.4.6.9011
 
+* The zero part of zero-inflated count models (`family = "zinb"`) in `bart()`
+  and `bcf()` gets random effects of its own whenever `rfx_group_ids_train` is
+  given: `pi = Phi(c0 + g(X) [+ tau_z(X) Z] + w' v_group)`, on the count part's
+  groups, basis (`model_spec`) and `random_effects_params` priors but with
+  separate parameters, sampled after the zero forest(s) on the zero part's
+  probit latent residual with unit variance. The intercept enters `pi`
+  everywhere: the structural-zero draw, the latent step, `zero_hat_train` /
+  `zero_hat_test` (now the full probit index), `predict()` (new term
+  `"zero_rfx"`, on the probit scale; `y_hat` on the `"response"` and
+  `"zero_probability"` scales now needs `rfx_group_ids`), the posterior
+  predictive, contrasts, and JSON (a second random-effects container). Unseen
+  groups follow `random_effects_params$unseen_groups` in `bart()`; `bcf()`
+  refuses them on both parts, as before. New outputs `zero_rfx_samples`,
+  `zero_rfx_preds_train`, `zero_rfx_preds_test`.
+  `general_params$zero_random_effects = FALSE` turns it off and reproduces the
+  previous draws bitwise; models without group ids, negative-binomial models
+  and saved models without the field are unchanged.
+
 * `bcf()` fits count outcomes: `OutcomeModel("count", "log")` (negative
   binomial) and `OutcomeModel("count", "log", family = "zinb")`. The count part
   is `log(mu) = offset + c + mu(X, pi_hat) + [tau_0 + tau(X)] b(Z) [+ rfx]`, so

@@ -211,3 +211,43 @@ Found and left unchanged (pre-existing, upstream code):
   (`forest_model_config_mu$update_leaf_model_scale(current_leaf_scale_mu)`);
   the MCMC loop is correct.
 - The Gaussian `tau_0` and adaptive-coding updates ignore `observation_weights`.
+
+## Random intercept on the ZINB zero part (0.4.6.9011)
+
+Branch `claude/zinb-zero-rfx`, on `cma-bcf-count` (d8a0cb7b). With
+`rfx_group_ids_train` and `family = "zinb"`, the zero part of `bart()` and
+`bcf()` gets its own random effects: `pi_i = Phi(c0 + g(x_i) [+ tau_z(x_i) z_i]
++ w_i' v_k(i))` on the count part's groups, basis and `random_effects_params`
+priors, with separate parameters `v`. Default on;
+`general_params$zero_random_effects = FALSE` gives the previous model draw for draw.
+
+**Scheme**: a second `RandomEffectsModel` / `RandomEffectsDataset` (no
+variance weights) / `RandomEffectsTracker` / `RandomEffectSamples`, sampled
+right after the zero forest(s) on the zero part's latent residual
+`z - c0 - forests - w'v` with `global_variance = 1`, the way probit `bart()`
+samples its rfx. `v` enters the structural-zero draw and the truncated-normal
+mean. Chain resets, warm starts and GFR deletion mirror the count rfx. Output:
+`zero_rfx_samples`, `zero_rfx_preds_train/test`; `zero_hat_*` are now the full
+index. `predict()` term `"zero_rfx"` (probit scale on every scale); `y_hat` on
+the response / zero-probability scales includes `v` and needs group ids. JSON:
+flag `has_zero_rfx` and `random_effect_container_1`. Unseen groups follow
+`unseen_groups` in `bart()`; `bcf()` refuses them on both parts (no policy
+there, unchanged).
+
+**Recovery** (60 tracts x 30 rows, intercept SD 0.4 count / 0.7 zero, r = 5,
+8 seeds): `bart()` pi correlation 0.882-0.927 with vs 0.535-0.677 without,
+response RMSE ratio <= 0.834, intercept correlation 0.870-0.924. `bcf()` with
+treatment correlated 0.35-0.49 with the zero intercept: zero-part effect error
+0.076-0.296 with vs 0.556-0.824 without; the remainder is leakage through the
+partially pooled intercepts (error 0.01-0.2 when treatment is unconfounded).
+
+**Mixing** (`bcf()`, same panel, 4 chains x 1,000 draws, 3 seeds, GFR and root
+starts): split R-hat of the response-scale ATE <= 1.008 with vs <= 1.005
+without; bulk ESS 468-660 vs 520-851 of 4,000. Zero-part effect: R-hat <= 1.035
+vs <= 1.025, ESS 133-192 vs 173-243. **Timing** (n = 5,000, 100 tracts, default
+trees, ms per iteration): `bart()` ZINB 32.2 -> 32.6; `bcf()` ZINB 69-71 ->
+68.5-68.8 (within run-to-run noise).
+
+The seeded references `tests/testthat/fixtures/zinb-rfx-reference.rds` pin
+ZINB without group ids, ZINB with the switch off (`bart()` and `bcf()`) and NB
+with group ids (`bart()` and `bcf()`) to d8a0cb7b bitwise.
