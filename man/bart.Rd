@@ -28,7 +28,8 @@ bart(
   retained_sample_ids = NULL,
   offset_train = NULL,
   offset_test = NULL,
-  zero_forest_params = list()
+  zero_forest_params = list(),
+  zero_random_effects_params = list()
 )
 }
 \arguments{
@@ -195,6 +196,25 @@ exposure) and a warning is raised.}
 }
 
 Supplying \code{zero_forest_params} for any other outcome model is an error.}
+
+\item{zero_random_effects_params}{(Optional) Zero-inflated count outcomes (\code{family = "zinb"}) with
+\code{rfx_group_ids_train} and \code{general_params$zero_random_effects = TRUE} only. The prior of the zero
+part's random effects, as a list with any of the prior keys of \code{random_effects_params}:
+\code{working_parameter_prior_mean}, \code{group_parameter_prior_mean}, \code{working_parameter_prior_cov},
+\code{group_parameter_prior_cov}, \code{variance_prior_shape} and \code{variance_prior_scale}. A key left out takes the
+count part's value from \code{random_effects_params}, so the default \code{list()} gives both parts the same prior,
+as before this argument existed (draw for draw). The groups, basis (\code{model_spec}) and unseen-group policy
+are always the count part's and cannot be set here. Supplying a non-empty list for any other model is an
+error.
+
+The random effects are parameter-expanded: a group's effect is \code{alpha * xi_k} (per basis component),
+with the working parameter \code{alpha ~ N(0, working_parameter_prior_cov)}, \code{xi_k ~ N(0, s2)} and
+\code{s2 ~ IG(variance_prior_shape, variance_prior_scale)} (shape, scale; \code{1 / s2 ~ Gamma(shape, rate = scale)}). The prior means only set the starting values. With \code{variance_prior_shape = variance_prior_scale = nu / 2} the implied prior on the effect's standard deviation \verb{|alpha| sqrt(s2)}
+is a half-t with \code{nu} degrees of freedom and scale \code{sqrt(working_parameter_prior_cov)} (Gelman 2006);
+\code{nu = 1} (shape and scale \code{0.5}) is a half-Cauchy with that scale. The defaults (\code{1}, \code{1}, covariance 1)
+are a half-t with 2 degrees of freedom and scale 1 on the probit scale. For example,
+\code{list(working_parameter_prior_cov = 0.094^2, variance_prior_shape = 0.5, variance_prior_scale = 0.5)}
+puts a half-Cauchy(0, 0.094) prior on the SD of a zero-part random intercept.}
 }
 \value{
 List of sampling outputs and a wrapper around the sampled forests (which can be used for in-memory prediction on new data, or serialized to JSON on disk).
@@ -246,7 +266,8 @@ random effects.
 With \code{rfx_group_ids_train}, the zero part also gets random effects (unless
 \code{general_params$zero_random_effects = FALSE}): \verb{pi_i = Phi(c0 + g(X_i) + w_i' v_{k(i)})}, with the
 basis \code{w_i} of the count part (a column of ones for \code{model_spec = "intercept_only"}), the same groups
-and the same \code{random_effects_params} priors, but parameters \code{v} of their own. They are sampled right
+and, unless \code{zero_random_effects_params} sets its own, the same \code{random_effects_params} priors, but
+parameters \code{v} of their own. They are sampled right
 after the zero forest, on the zero part's latent residual \code{z_i - c0 - g(X_i)} with unit variance (no
 Pólya-Gamma weights), and enter \code{pi} everywhere: the draw of \code{s}, the latent step, \code{zero_hat_train}
 and \code{zero_hat_test}, \code{predict()}, the posterior predictive and the serialized model (a second

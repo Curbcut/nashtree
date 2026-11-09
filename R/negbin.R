@@ -303,6 +303,106 @@
   loadRandomEffectSamplesCombinedJson(json_object_list, 1)
 }
 
+# Prior of the zero part's random effects in a zero-inflated model. The keys
+# of `zero_params` (zero_random_effects_params) override the count part's
+# `rfx_params` (random_effects_params after defaults); unset keys keep the
+# count part's values, so an empty list gives the count part's prior exactly.
+# The groups, basis (model_spec) and unseen-group policy are the count part's
+# and cannot be set here. Returns the same initial values and priors the count
+# part computes in bart() and bcf().
+.zinbZeroRfxPriorKeys <- c(
+  "working_parameter_prior_mean",
+  "group_parameter_prior_mean",
+  "working_parameter_prior_cov",
+  "group_parameter_prior_cov",
+  "variance_prior_shape",
+  "variance_prior_scale"
+)
+
+.zinbCheckZeroRfxParams <- function(zero_params) {
+  if (is.null(zero_params)) {
+    return(invisible(NULL))
+  }
+  if (!is.list(zero_params)) {
+    stop("zero_random_effects_params must be a list")
+  }
+  if (length(zero_params) > 0) {
+    keys <- names(zero_params)
+    if (is.null(keys) || any(!nzchar(keys))) {
+      stop("zero_random_effects_params must be a named list")
+    }
+    bad <- setdiff(keys, .zinbZeroRfxPriorKeys)
+    if (length(bad) > 0) {
+      stop(
+        "zero_random_effects_params accepts only ",
+        paste(.zinbZeroRfxPriorKeys, collapse = ", "),
+        " (the zero part shares the count part's groups, basis and unseen-group policy); got: ",
+        paste(bad, collapse = ", ")
+      )
+    }
+  }
+  for (key in c("variance_prior_shape", "variance_prior_scale")) {
+    val <- zero_params[[key]]
+    if (
+      !is.null(val) &&
+        (!is.numeric(val) || length(val) != 1 || !is.finite(val) || val <= 0)
+    ) {
+      stop(sprintf(
+        "zero_random_effects_params$%s must be a single positive number",
+        key
+      ))
+    }
+  }
+  invisible(NULL)
+}
+
+.zinbZeroRfxPrior <- function(
+  rfx_params,
+  zero_params,
+  num_components,
+  num_groups
+) {
+  p <- preprocessParams(rfx_params[.zinbZeroRfxPriorKeys], zero_params)
+  if (is.null(p$working_parameter_prior_mean)) {
+    alpha_init <- rep(0, num_components)
+  } else {
+    alpha_init <- expand_dims_1d(p$working_parameter_prior_mean, num_components)
+  }
+  if (is.null(p$group_parameter_prior_mean)) {
+    xi_init <- matrix(rep(alpha_init, num_groups), num_components, num_groups)
+  } else {
+    xi_init <- expand_dims_2d(
+      p$group_parameter_prior_mean,
+      num_components,
+      num_groups
+    )
+  }
+  if (is.null(p$working_parameter_prior_cov)) {
+    sigma_alpha_init <- diag(1, num_components, num_components)
+  } else {
+    sigma_alpha_init <- expand_dims_2d_diag(
+      p$working_parameter_prior_cov,
+      num_components
+    )
+  }
+  if (is.null(p$group_parameter_prior_cov)) {
+    sigma_xi_init <- diag(1, num_components, num_components)
+  } else {
+    sigma_xi_init <- expand_dims_2d_diag(
+      p$group_parameter_prior_cov,
+      num_components
+    )
+  }
+  list(
+    alpha_init = alpha_init,
+    xi_init = xi_init,
+    sigma_alpha_init = sigma_alpha_init,
+    sigma_xi_init = sigma_xi_init,
+    sigma_xi_shape = p$variance_prior_shape,
+    sigma_xi_scale = p$variance_prior_scale
+  )
+}
+
 # Column indices of X_train a forest may split on, from keep / drop lists of
 # names or indices (keep takes precedence), as bart() does for its mean and
 # variance forests.

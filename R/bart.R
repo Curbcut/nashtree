@@ -120,6 +120,26 @@ NULL
 #'   - `keep_vars`, `drop_vars`, `num_features_subsample` Variable selection for the zero forest, as for the mean forest.
 #'
 #'   Supplying `zero_forest_params` for any other outcome model is an error.
+#' @param zero_random_effects_params (Optional) Zero-inflated count outcomes (`family = "zinb"`) with
+#'   `rfx_group_ids_train` and `general_params$zero_random_effects = TRUE` only. The prior of the zero
+#'   part's random effects, as a list with any of the prior keys of `random_effects_params`:
+#'   `working_parameter_prior_mean`, `group_parameter_prior_mean`, `working_parameter_prior_cov`,
+#'   `group_parameter_prior_cov`, `variance_prior_shape` and `variance_prior_scale`. A key left out takes the
+#'   count part's value from `random_effects_params`, so the default `list()` gives both parts the same prior,
+#'   as before this argument existed (draw for draw). The groups, basis (`model_spec`) and unseen-group policy
+#'   are always the count part's and cannot be set here. Supplying a non-empty list for any other model is an
+#'   error.
+#'
+#'   The random effects are parameter-expanded: a group's effect is `alpha * xi_k` (per basis component),
+#'   with the working parameter `alpha ~ N(0, working_parameter_prior_cov)`, `xi_k ~ N(0, s2)` and
+#'   `s2 ~ IG(variance_prior_shape, variance_prior_scale)` (shape, scale; `1 / s2 ~ Gamma(shape, rate =
+#'   scale)`). The prior means only set the starting values. With `variance_prior_shape =
+#'   variance_prior_scale = nu / 2` the implied prior on the effect's standard deviation `|alpha| sqrt(s2)`
+#'   is a half-t with `nu` degrees of freedom and scale `sqrt(working_parameter_prior_cov)` (Gelman 2006);
+#'   `nu = 1` (shape and scale `0.5`) is a half-Cauchy with that scale. The defaults (`1`, `1`, covariance 1)
+#'   are a half-t with 2 degrees of freedom and scale 1 on the probit scale. For example,
+#'   `list(working_parameter_prior_cov = 0.094^2, variance_prior_shape = 0.5, variance_prior_scale = 0.5)`
+#'   puts a half-Cauchy(0, 0.094) prior on the SD of a zero-part random intercept.
 #' @param offset_test (Optional) Count outcomes only. Offset for `X_test`, of length `nrow(X_test)`. If
 #'   `offset_train` is supplied and `offset_test` is not, test-set predictions use an offset of 0 (unit
 #'   exposure) and a warning is raised.
@@ -244,7 +264,8 @@ NULL
 #' With `rfx_group_ids_train`, the zero part also gets random effects (unless
 #' `general_params$zero_random_effects = FALSE`): `pi_i = Phi(c0 + g(X_i) + w_i' v_{k(i)})`, with the
 #' basis `w_i` of the count part (a column of ones for `model_spec = "intercept_only"`), the same groups
-#' and the same `random_effects_params` priors, but parameters `v` of their own. They are sampled right
+#' and, unless `zero_random_effects_params` sets its own, the same `random_effects_params` priors, but
+#' parameters `v` of their own. They are sampled right
 #' after the zero forest, on the zero part's latent residual `z_i - c0 - g(X_i)` with unit variance (no
 #' Pólya-Gamma weights), and enter `pi` everywhere: the draw of `s`, the latent step, `zero_hat_train`
 #' and `zero_hat_test`, `predict()`, the posterior predictive and the serialized model (a second
@@ -324,7 +345,8 @@ bart <- function(
   retained_sample_ids = NULL,
   offset_train = NULL,
   offset_test = NULL,
-  zero_forest_params = list()
+  zero_forest_params = list(),
+  zero_random_effects_params = list()
 ) {
   forest_retention <- match.arg(forest_retention)
   importance_only <- identical(forest_retention, "importance")
@@ -516,6 +538,7 @@ bart <- function(
   rfx_unseen_groups <- validateRfxUnseenGroups(
     rfx_params_updated$unseen_groups
   )
+  .zinbCheckZeroRfxParams(zero_random_effects_params)
 
   # Validate before changing RNG state or allocating sampler objects. Random
   # effects are compatible with both retention modes: they are sampled as usual
@@ -1359,6 +1382,11 @@ bart <- function(
   # Zero-inflated family: the zero part gets its own random effects on the
   # same groups and basis unless general_params$zero_random_effects = FALSE
   has_zero_rfx <- outcome_is_zinb && has_rfx && zero_random_effects
+  if (length(zero_random_effects_params) > 0 && !has_zero_rfx) {
+    stop(
+      "zero_random_effects_params applies only to family = 'zinb' with rfx_group_ids_train and general_params$zero_random_effects = TRUE"
+    )
+  }
   if (has_rfx_test) {
     if (rfx_model_spec == "custom") {
       if (is.null(rfx_basis_test)) {
@@ -1989,10 +2017,17 @@ bart <- function(
     )
   }
 
-  # Zero-part random effects: same groups, basis and priors as the count
-  # part, sampled on the probit latent residual of the zero part with unit
-  # variance (no Polya-Gamma weights)
+  # Zero-part random effects: same groups and basis as the count part, priors
+  # from zero_random_effects_params (default: the count part's), sampled on
+  # the probit latent residual of the zero part with unit variance (no
+  # Polya-Gamma weights)
   if (has_zero_rfx) {
+    zero_rfx_prior <- .zinbZeroRfxPrior(
+      rfx_params_updated,
+      zero_random_effects_params,
+      num_rfx_components,
+      num_rfx_groups
+    )
     zero_rfx_dataset_train <- createRandomEffectsDataset(
       rfx_group_ids_train,
       rfx_basis_train
@@ -2004,12 +2039,12 @@ bart <- function(
     )
     rootResetRandomEffectsModel(
       zero_rfx_model,
-      alpha_init,
-      xi_init,
-      sigma_alpha_init,
-      sigma_xi_init,
-      sigma_xi_shape,
-      sigma_xi_scale
+      zero_rfx_prior$alpha_init,
+      zero_rfx_prior$xi_init,
+      zero_rfx_prior$sigma_alpha_init,
+      zero_rfx_prior$sigma_xi_init,
+      zero_rfx_prior$sigma_xi_shape,
+      zero_rfx_prior$sigma_xi_scale
     )
     zero_rfx_samples <- createRandomEffectSamples(
       num_rfx_components,
@@ -2673,7 +2708,7 @@ bart <- function(
               zero_rfx_model,
               zero_rfx_samples,
               forest_ind,
-              sigma_alpha_init
+              zero_rfx_prior$sigma_alpha_init
             )
             resetRandomEffectsTracker(
               zero_rfx_tracker_train,
@@ -2841,12 +2876,12 @@ bart <- function(
               )
               rootResetRandomEffectsModel(
                 zero_rfx_model,
-                alpha_init,
-                xi_init,
-                sigma_alpha_init,
-                sigma_xi_init,
-                sigma_xi_shape,
-                sigma_xi_scale
+                zero_rfx_prior$alpha_init,
+                zero_rfx_prior$xi_init,
+                zero_rfx_prior$sigma_alpha_init,
+                zero_rfx_prior$sigma_xi_init,
+                zero_rfx_prior$sigma_xi_shape,
+                zero_rfx_prior$sigma_xi_scale
               )
               rootResetRandomEffectsTracker(
                 zero_rfx_tracker_train,
@@ -2859,7 +2894,7 @@ bart <- function(
                 zero_rfx_model,
                 previous_zero_rfx_samples,
                 warmstart_index - 1,
-                sigma_alpha_init
+                zero_rfx_prior$sigma_alpha_init
               )
               resetRandomEffectsTracker(
                 zero_rfx_tracker_train,
@@ -2972,12 +3007,12 @@ bart <- function(
           if (has_zero_rfx) {
             rootResetRandomEffectsModel(
               zero_rfx_model,
-              alpha_init,
-              xi_init,
-              sigma_alpha_init,
-              sigma_xi_init,
-              sigma_xi_shape,
-              sigma_xi_scale
+              zero_rfx_prior$alpha_init,
+              zero_rfx_prior$xi_init,
+              zero_rfx_prior$sigma_alpha_init,
+              zero_rfx_prior$sigma_xi_init,
+              zero_rfx_prior$sigma_xi_shape,
+              zero_rfx_prior$sigma_xi_scale
             )
             rootResetRandomEffectsTracker(
               zero_rfx_tracker_train,

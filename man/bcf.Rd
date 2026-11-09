@@ -30,7 +30,8 @@ bcf(
   offset_train = NULL,
   offset_test = NULL,
   zero_prognostic_forest_params = list(),
-  zero_treatment_effect_forest_params = list()
+  zero_treatment_effect_forest_params = list(),
+  zero_random_effects_params = list()
 )
 }
 \arguments{
@@ -188,6 +189,25 @@ Default: \code{NULL}.}
 \item{zero_prognostic_forest_params}{(Optional) Zero-inflated count outcomes only. Parameters of the probit zero-part prognostic forest: \code{num_trees} (default \code{50}), \code{alpha} (\code{0.95}), \code{beta} (\code{2}), \code{min_samples_leaf} (\code{5}), \code{max_depth} (\code{10}) and \code{sigma2_leaf_init} (default \code{2 / num_trees}, held fixed). The forest uses the variable weights (including the propensity column) of the count prognostic forest.}
 
 \item{zero_treatment_effect_forest_params}{(Optional) Zero-inflated count outcomes only. Parameters of the probit zero-part treatment forest, whose basis is the raw treatment: \code{num_trees} (default \code{25}), \code{alpha} (\code{0.25}), \code{beta} (\code{3}), \code{min_samples_leaf} (\code{5}), \code{max_depth} (\code{5}), \code{delta_max} (\code{0.5}) and \code{sigma2_leaf_init} (default \verb{(delta_max / (qnorm(0.84135) dnorm(0)))^2 / num_trees}, the probit BCF calibration, held fixed). It uses the variable weights of the count treatment forest.}
+
+\item{zero_random_effects_params}{(Optional) Zero-inflated count outcomes (\code{family = "zinb"}) with
+\code{rfx_group_ids_train} and \code{general_params$zero_random_effects = TRUE} only. The prior of the zero
+part's random effects, as a list with any of the prior keys of \code{random_effects_params}:
+\code{working_parameter_prior_mean}, \code{group_parameter_prior_mean}, \code{working_parameter_prior_cov},
+\code{group_parameter_prior_cov}, \code{variance_prior_shape} and \code{variance_prior_scale}. A key left out takes the
+count part's value from \code{random_effects_params}, so the default \code{list()} gives both parts the same prior,
+as before this argument existed (draw for draw). The groups, basis (\code{model_spec}) and unseen-group policy
+are always the count part's and cannot be set here. Supplying a non-empty list for any other model is an
+error.
+
+The random effects are parameter-expanded: a group's effect is \code{alpha * xi_k} (per basis component),
+with the working parameter \code{alpha ~ N(0, working_parameter_prior_cov)}, \code{xi_k ~ N(0, s2)} and
+\code{s2 ~ IG(variance_prior_shape, variance_prior_scale)} (shape, scale; \code{1 / s2 ~ Gamma(shape, rate = scale)}). The prior means only set the starting values. With \code{variance_prior_shape = variance_prior_scale = nu / 2} the implied prior on the effect's standard deviation \verb{|alpha| sqrt(s2)}
+is a half-t with \code{nu} degrees of freedom and scale \code{sqrt(working_parameter_prior_cov)} (Gelman 2006);
+\code{nu = 1} (shape and scale \code{0.5}) is a half-Cauchy with that scale. The defaults (\code{1}, \code{1}, covariance 1)
+are a half-t with 2 degrees of freedom and scale 1 on the probit scale. For example,
+\code{list(working_parameter_prior_cov = 0.094^2, variance_prior_shape = 0.5, variance_prior_scale = 0.5)}
+puts a half-Cauchy(0, 0.094) prior on the SD of a zero-part random intercept.}
 }
 \value{
 List of sampling outputs and a wrapper around the sampled forests (which can be used for in-memory prediction on new data, or serialized to JSON on disk).
@@ -217,7 +237,8 @@ probability of a structural zero, with a probit prognostic forest \code{mu_z} an
 drop out of the count part through infinite variance weights. The zero part has no intercept \code{tau_0} and
 no adaptive coding, and a multivariate treatment is refused. With \code{rfx_group_ids_train} it gets random
 effects of its own (unless \code{general_params$zero_random_effects = FALSE}): the count part's groups, basis
-(\code{model_spec}) and priors, separate parameters, sampled after the zero forests on the zero part's latent
+(\code{model_spec}) and priors (or those of \code{zero_random_effects_params}), separate parameters, sampled after
+the zero forests on the zero part's latent
 residual with unit variance, and entering \code{pi} everywhere, as in \code{\link[=bart]{bart()}}. As for the count part, group
 labels not seen in training are refused. \code{observation_weights} are
 refused with this family (with \code{family = "negbin"} they multiply the variance weights).
