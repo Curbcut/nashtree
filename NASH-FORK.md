@@ -297,3 +297,46 @@ trees, ms per iteration): `bart()` ZINB 32.2 -> 32.6; `bcf()` ZINB 69-71 ->
 The seeded references `tests/testthat/fixtures/zinb-rfx-reference.rds` pin
 ZINB without group ids, ZINB with the switch off (`bart()` and `bcf()`) and NB
 with group ids (`bart()` and `bcf()`) to d8a0cb7b bitwise.
+
+## A prior of its own for the ZINB zero-part random effects (0.4.6.9011)
+
+Branch `claude/zinb-zero-rfx-prior-3da03e`, on `cma-rfx` (1273f128). `bart()`
+and `bcf()` take `zero_random_effects_params`, a list with any of the six
+prior keys of `random_effects_params` (`working_parameter_prior_mean`,
+`group_parameter_prior_mean`, `working_parameter_prior_cov`,
+`group_parameter_prior_cov`, `variance_prior_shape`, `variance_prior_scale`).
+Keys left out take the count part's values, so the default `list()` gives the
+zero part the count part's prior as before. The groups, basis (`model_spec`)
+and `unseen_groups` stay shared and are refused here. A non-empty list without
+`family = "zinb"`, group ids and `zero_random_effects = TRUE` is an error.
+
+**Scheme.** R only: `.zinbZeroRfxPrior()` (`R/negbin.R`) resolves the zero
+part's starting values and priors the way the count part does. They replace
+the count part's at the five places the zero-part `RandomEffectsModel` is set
+up or reset: the initial set-up, chain starts from GFR draws, warm starts
+(with and without previous zero-part samples) and root starts. The C++ needed
+no change: the zero part already has its own model object, whose priors are
+set through the existing setters, and the count part's code is untouched.
+
+**Mapping a half-Cauchy prior.** The random effects are parameter-expanded:
+effect `alpha * xi_k`, `alpha ~ N(0, working_parameter_prior_cov)`,
+`xi_k ~ N(0, s2)`, `s2 ~ IG(variance_prior_shape, variance_prior_scale)` with
+`1 / s2 ~ Gamma(shape, rate = scale)`. The prior means are starting values
+only (both conditionals have zero prior mean in `src/random_effects.cpp`).
+With shape = scale = `nu / 2`, the SD `|alpha| sqrt(s2)` is half-t with `nu`
+degrees of freedom and scale `sqrt(working_parameter_prior_cov)` (Gelman 2006).
+So `list(working_parameter_prior_cov = A^2, variance_prior_shape = 0.5,
+variance_prior_scale = 0.5)` is exactly half-Cauchy(0, A). The default (1, 1,
+covariance 1) is half-t_2 with scale 1 (prior median 0.82).
+
+**Tests** (`test-zinb-zero-rfx-prior.R`). Seeded references
+(`fixtures/zinb-zero-rfx-prior-reference.rds`, from a build of 1273f128) pin,
+bitwise: Gaussian, probit and NB `bart()` / `bcf()` with group ids, cloglog
+`bart()`, and default-prior ZINB `bart()` / `bcf()` with zero-part random
+effects (GFR-started and root-started chains, warm starts). The count prior
+written out as the zero prior, in full or key by key, reproduces the default
+draws bitwise, including a non-default count prior that the zero part
+inherits. A tight zero prior holds the zero-part effects below 0.01 at every
+chain start while the count part's stay free, and the reverse also holds.
+A half-Cauchy with scale 0.001 holds strong group effects (true SD about 1),
+and with scale 0.1 lets them through, as a heavy tail should.

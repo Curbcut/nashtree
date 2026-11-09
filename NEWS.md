@@ -1,5 +1,13 @@
 # nashtree 0.4.6.9011
 
+* `bart()` and `bcf()` take `zero_random_effects_params`: a prior for the
+  zero-part random effects of zero-inflated count models, separate from the
+  count part's. It accepts the prior keys of `random_effects_params`; keys left
+  out take the count part's values, so the default `list()` reproduces the
+  previous draws bitwise. `list(working_parameter_prior_cov = A^2,
+  variance_prior_shape = 0.5, variance_prior_scale = 0.5)` is a half-Cauchy(0,
+  A) prior on the SD of a zero-part random intercept.
+
 * The zero part of zero-inflated count models (`family = "zinb"`) in `bart()`
   and `bcf()` gets random effects of its own whenever `rfx_group_ids_train` is
   given: `pi = Phi(c0 + g(X) [+ tau_z(X) Z] + w' v_group)`, on the count part's

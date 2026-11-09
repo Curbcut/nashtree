@@ -195,6 +195,26 @@ NULL
 #' @param offset_test (Optional) Count outcomes only. Offset for `X_test`. If `offset_train` is supplied and `offset_test` is not, test-set predictions use an offset of 0 with a warning.
 #' @param zero_prognostic_forest_params (Optional) Zero-inflated count outcomes only. Parameters of the probit zero-part prognostic forest: `num_trees` (default `50`), `alpha` (`0.95`), `beta` (`2`), `min_samples_leaf` (`5`), `max_depth` (`10`) and `sigma2_leaf_init` (default `2 / num_trees`, held fixed). The forest uses the variable weights (including the propensity column) of the count prognostic forest.
 #' @param zero_treatment_effect_forest_params (Optional) Zero-inflated count outcomes only. Parameters of the probit zero-part treatment forest, whose basis is the raw treatment: `num_trees` (default `25`), `alpha` (`0.25`), `beta` (`3`), `min_samples_leaf` (`5`), `max_depth` (`5`), `delta_max` (`0.5`) and `sigma2_leaf_init` (default `(delta_max / (qnorm(0.84135) dnorm(0)))^2 / num_trees`, the probit BCF calibration, held fixed). It uses the variable weights of the count treatment forest.
+#' @param zero_random_effects_params (Optional) Zero-inflated count outcomes (`family = "zinb"`) with
+#'   `rfx_group_ids_train` and `general_params$zero_random_effects = TRUE` only. The prior of the zero
+#'   part's random effects, as a list with any of the prior keys of `random_effects_params`:
+#'   `working_parameter_prior_mean`, `group_parameter_prior_mean`, `working_parameter_prior_cov`,
+#'   `group_parameter_prior_cov`, `variance_prior_shape` and `variance_prior_scale`. A key left out takes the
+#'   count part's value from `random_effects_params`, so the default `list()` gives both parts the same prior,
+#'   as before this argument existed (draw for draw). The groups, basis (`model_spec`) and unseen-group policy
+#'   are always the count part's and cannot be set here. Supplying a non-empty list for any other model is an
+#'   error.
+#'
+#'   The random effects are parameter-expanded: a group's effect is `alpha * xi_k` (per basis component),
+#'   with the working parameter `alpha ~ N(0, working_parameter_prior_cov)`, `xi_k ~ N(0, s2)` and
+#'   `s2 ~ IG(variance_prior_shape, variance_prior_scale)` (shape, scale; `1 / s2 ~ Gamma(shape, rate =
+#'   scale)`). The prior means only set the starting values. With `variance_prior_shape =
+#'   variance_prior_scale = nu / 2` the implied prior on the effect's standard deviation `|alpha| sqrt(s2)`
+#'   is a half-t with `nu` degrees of freedom and scale `sqrt(working_parameter_prior_cov)` (Gelman 2006);
+#'   `nu = 1` (shape and scale `0.5`) is a half-Cauchy with that scale. The defaults (`1`, `1`, covariance 1)
+#'   are a half-t with 2 degrees of freedom and scale 1 on the probit scale. For example,
+#'   `list(working_parameter_prior_cov = 0.094^2, variance_prior_shape = 0.5, variance_prior_scale = 0.5)`
+#'   puts a half-Cauchy(0, 0.094) prior on the SD of a zero-part random intercept.
 #'
 #' @section Count outcomes:
 #' `general_params = list(outcome_model = OutcomeModel("count", "log"))` fits
@@ -217,7 +237,8 @@ NULL
 #' drop out of the count part through infinite variance weights. The zero part has no intercept `tau_0` and
 #' no adaptive coding, and a multivariate treatment is refused. With `rfx_group_ids_train` it gets random
 #' effects of its own (unless `general_params$zero_random_effects = FALSE`): the count part's groups, basis
-#' (`model_spec`) and priors, separate parameters, sampled after the zero forests on the zero part's latent
+#' (`model_spec`) and priors (or those of `zero_random_effects_params`), separate parameters, sampled after
+#' the zero forests on the zero part's latent
 #' residual with unit variance, and entering `pi` everywhere, as in [bart()]. As for the count part, group
 #' labels not seen in training are refused. `observation_weights` are
 #' refused with this family (with `family = "negbin"` they multiply the variance weights).
@@ -305,7 +326,8 @@ bcf <- function(
   offset_train = NULL,
   offset_test = NULL,
   zero_prognostic_forest_params = list(),
-  zero_treatment_effect_forest_params = list()
+  zero_treatment_effect_forest_params = list(),
+  zero_random_effects_params = list()
 ) {
   # Update general BCF parameters
   general_params_default <- list(
@@ -528,6 +550,7 @@ bcf <- function(
   rfx_group_parameter_prior_cov <- rfx_params_updated$group_parameter_prior_cov
   rfx_variance_prior_shape <- rfx_params_updated$variance_prior_shape
   rfx_variance_prior_scale <- rfx_params_updated$variance_prior_scale
+  .zinbCheckZeroRfxParams(zero_random_effects_params)
 
   # 6. Zero-part forest parameters (zero-inflated count outcomes)
   num_trees_zero_mu <- zero_prognostic_forest_params_updated$num_trees
@@ -1383,6 +1406,11 @@ bcf <- function(
   # Zero-inflated family: the zero part gets its own random effects on the
   # same groups and basis unless general_params$zero_random_effects = FALSE
   has_zero_rfx <- outcome_is_zinb && has_rfx && zero_random_effects
+  if (length(zero_random_effects_params) > 0 && !has_zero_rfx) {
+    stop(
+      "zero_random_effects_params applies only to family = 'zinb' with rfx_group_ids_train and general_params$zero_random_effects = TRUE"
+    )
+  }
   if (has_rfx_test) {
     if (rfx_model_spec == "custom") {
       if (is.null(rfx_basis_test)) {
@@ -1983,10 +2011,17 @@ bcf <- function(
     )
   }
 
-  # Zero-part random effects: same groups, basis and priors as the count
-  # part, sampled on the probit latent residual of the zero part with unit
-  # variance (no Polya-Gamma weights)
+  # Zero-part random effects: same groups and basis as the count part, priors
+  # from zero_random_effects_params (default: the count part's), sampled on
+  # the probit latent residual of the zero part with unit variance (no
+  # Polya-Gamma weights)
   if (has_zero_rfx) {
+    zero_rfx_prior <- .zinbZeroRfxPrior(
+      rfx_params_updated,
+      zero_random_effects_params,
+      num_rfx_components,
+      num_rfx_groups
+    )
     zero_rfx_dataset_train <- createRandomEffectsDataset(
       rfx_group_ids_train,
       rfx_basis_train
@@ -1998,12 +2033,12 @@ bcf <- function(
     )
     rootResetRandomEffectsModel(
       zero_rfx_model,
-      alpha_init,
-      xi_init,
-      sigma_alpha_init,
-      sigma_xi_init,
-      sigma_xi_shape,
-      sigma_xi_scale
+      zero_rfx_prior$alpha_init,
+      zero_rfx_prior$xi_init,
+      zero_rfx_prior$sigma_alpha_init,
+      zero_rfx_prior$sigma_xi_init,
+      zero_rfx_prior$sigma_xi_shape,
+      zero_rfx_prior$sigma_xi_scale
     )
     zero_rfx_samples <- createRandomEffectSamples(
       num_rfx_components,
@@ -2516,12 +2551,12 @@ bcf <- function(
       if (is.null(samples)) {
         rootResetRandomEffectsModel(
           zero_rfx_model,
-          alpha_init,
-          xi_init,
-          sigma_alpha_init,
-          sigma_xi_init,
-          sigma_xi_shape,
-          sigma_xi_scale
+          zero_rfx_prior$alpha_init,
+          zero_rfx_prior$xi_init,
+          zero_rfx_prior$sigma_alpha_init,
+          zero_rfx_prior$sigma_xi_init,
+          zero_rfx_prior$sigma_xi_shape,
+          zero_rfx_prior$sigma_xi_scale
         )
         rootResetRandomEffectsTracker(
           zero_rfx_tracker_train,
@@ -2534,7 +2569,7 @@ bcf <- function(
           zero_rfx_model,
           samples,
           index,
-          sigma_alpha_init
+          zero_rfx_prior$sigma_alpha_init
         )
         resetRandomEffectsTracker(
           zero_rfx_tracker_train,
