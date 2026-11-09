@@ -161,7 +161,10 @@ test_that("Gaussian and probit BCF draws are bitwise identical to cma-zinb (242a
   )
   source(test_path("fixtures", "make-bcf-reference.R"), local = TRUE)
   current <- suppressWarnings(bcf_reference_fits())
-  for (name in setdiff(names(ref), c("platform", "generated_from"))) {
+  # gaussian_dose_weighted carries observation_weights, which the Gaussian
+  # tau_0 update has used since this reference was taken (test-bcf-fixes.R).
+  skip_names <- c("platform", "generated_from", "gaussian_dose_weighted")
+  for (name in setdiff(names(ref), skip_names)) {
     expect_identical(current[[name]], ref[[name]], label = name)
   }
 })

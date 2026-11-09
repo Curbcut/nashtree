@@ -181,9 +181,9 @@ Branch `cma-bcf-count`, on `cma-zinb`. `bcf()` accepts
 `(y - r) / (2 omega) + log r - o` into `resid_train` (the role the latent `z`
 plays for probit) and variance weights `1 / omega` into the forest and rfx
 datasets; the forests, rfx, GFR and chains then run unchanged. `tau_0` and the
-adaptive-coding parameters are sampled in R from unweighted sums in the
-Gaussian path, so the count path recomputes them with the precision weights
-`omega` (the Gaussian and probit paths are untouched). Variance forests and
+adaptive-coding parameters are sampled in R; the count path weights their
+sums by the precisions `omega` (Gaussian `observation_weights` were added to
+the same sums later, see below). Variance forests and
 `sample_sigma2_global = TRUE` are refused. Priors: prognostic leaf scale as in
 NB BART; treatment forest `sigma2_leaf = log_rate_ratio_prior_sd^2 / num_trees`
 (default sd 0.5 on the log-rate-ratio scale); `tau_0 ~ N(0, 1)`.
@@ -200,21 +200,67 @@ family): average log rate ratio error <= 0.060 (naive 0.18-0.38), 95% coverage
 <= 0.063 (8 / 8 covered), effect on pi error <= 0.020. **Timing** (n = 5,000,
 default 250 + 100 trees, ms per iteration): Gaussian 30.4, NB 63.9, ZINB 68.1.
 
-Found and left unchanged (pre-existing, upstream code):
+Found while doing this (pre-existing, upstream code): the probit `tau_0`
+omission listed under "Known upstream bugs" below, and two bugs fixed in the
+next section (the GFR treatment leaf scale, unweighted Gaussian `tau_0` and
+adaptive coding).
+
+## bcf() GFR treatment leaf scale and weighted tau_0 / adaptive coding
+
+Two upstream bugs in `R/bcf.R`, fixed on a branch from `cma-rfx` (84f5ccbb).
+`tests/testthat/fixtures/make-bcf-fixes-reference.R` captured seeded draws on
+84f5ccbb before the fixes; `test-bcf-fixes.R` checks them.
+
+- **GFR treatment leaf scale.** With
+  `treatment_effect_forest_params$sample_sigma2_leaf = TRUE`, each GFR
+  iteration drew a treatment leaf scale and then passed the prognostic scale
+  to the prognostic config, so the treatment forest kept its initial scale for
+  all GFR sweeps (the MCMC loop was right). The GFR loop now updates the
+  treatment config. The test instruments `createForestModelConfig()` and
+  checks the treatment config receives, and holds, every stored
+  `sigma2_leaf_tau` draw in order.
+- **Weighted Gaussian `tau_0` and adaptive coding.** The C++ leaf statistics
+  read `observation_weights` as variance multipliers `v_i`
+  (`sum_w += 1 / v_i`), but the R-side `tau_0` and `b_0` / `b_1` updates used
+  unweighted sums. They now use precisions `w_i = 1 / v_i` (`Z'W r`, `Z'W Z`,
+  weighted `s_tt`, `s_ty`; the adaptive-coding prior `N(0, 1/2)` is
+  unchanged), through `bcf_tau_0_posterior()` and `bcf_coding_suff_stats()`,
+  which the count path shares. Without weights, and for probit, the
+  unweighted arithmetic is kept. Recovery (n = 800, 20% of rows with 400x
+  variance passed as weights, constant effect 1, 10 seeds, 10 GFR + 100
+  burn-in + 200 draws): without adaptive coding the posterior-mean `tau_0`
+  was 8-68 away from 1 (the weighted forest offsetting it) and is now within
+  0.72; with adaptive coding the ATE RMSE fell from 0.37 (max error 0.75) to
+  0.048 (max 0.08). Without adaptive coding the ATE RMSE was already 0.045
+  (now 0.042).
+
+Unchanged, bitwise against the reference: Gaussian fits without weights
+(intercept, adaptive coding, both, rfx with two chains, variance forest),
+MCMC-only fits sampling the treatment leaf scale, and weighted probit fits.
+The count tests' Gaussian reference `gaussian_dose_weighted` carries weights,
+so it is no longer compared bitwise. NASH (Gaussian, no weights, no adaptive
+coding, treatment leaf scale fixed) takes none of the changed paths.
+
+## Known upstream bugs
+
+Pre-existing in upstream code and not fixed here:
 
 - Probit BCF with `sample_intercept = TRUE` (the default) omits `tau_0 b(z)`
   from both the truncated-normal mean and the residual handed to the forests
-  in the latent step, so the forests partly absorb `tau_0`. The count path
-  includes it.
-- In the GFR loop, sampling the treatment-forest leaf scale updates the
-  prognostic forest's config with the prognostic scale
-  (`forest_model_config_mu$update_leaf_model_scale(current_leaf_scale_mu)`);
-  the MCMC loop is correct.
-- The Gaussian `tau_0` and adaptive-coding updates ignore `observation_weights`.
+  in the latent step, so the forests partly absorb `tau_0`. Fixing it changes
+  probit draws. The count path includes the term.
+- Probit `tau_0` and adaptive coding still ignore `observation_weights` (the
+  probit latent step draws `z` with unit variance whatever the weights).
+- The R-side `tau_0` and adaptive-coding updates ignore a variance forest's
+  per-row variances (they use only `observation_weights`).
+- `observation_weights` of zero are infinite precision under the C++
+  convention: any zero weight makes Gaussian `bcf()` return `NaN` draws,
+  although the input checks describe all-zero weights as prior sampling.
 
 ## Random intercept on the ZINB zero part (0.4.6.9011)
 
-Branch `claude/zinb-zero-rfx`, on `cma-bcf-count` (d8a0cb7b). With
+Branch `claude/zinb-zero-rfx`, on `cma-bcf-count` (d8a0cb7b), merged with
+`cma-rfx` 2eab02bb (the #12 fixes). With
 `rfx_group_ids_train` and `family = "zinb"`, the zero part of `bart()` and
 `bcf()` gets its own random effects: `pi_i = Phi(c0 + g(x_i) [+ tau_z(x_i) z_i]
 + w_i' v_k(i))` on the count part's groups, basis and `random_effects_params`
