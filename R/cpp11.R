@@ -772,6 +772,10 @@ ordinal_sampler_update_cumsum_exp_cpp <- function(sampler_ptr, data_ptr) {
   invisible(.Call(`_nashtree_ordinal_sampler_update_cumsum_exp_cpp`, sampler_ptr, data_ptr))
 }
 
+sample_polya_gamma_cpp <- function(b, z, rng) {
+  .Call(`_nashtree_sample_polya_gamma_cpp`, b, z, rng)
+}
+
 init_json_cpp <- function() {
   .Call(`_nashtree_init_json_cpp`)
 }

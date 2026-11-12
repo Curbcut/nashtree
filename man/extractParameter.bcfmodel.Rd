@@ -31,6 +31,8 @@ The following conventions are used for parameter names:
 \item In-sample treatment effect forest predictions: \code{"tau_hat_train"}
 \item Test set treatment effect forest predictions: \code{"tau_hat_test"}
 \item Treatment effect intercept: \code{"tau_0"}, \code{"treatment_intercept"}, \code{"tau_intercept"}
+\item Negative-binomial size (dispersion) parameter \code{r} (count models): \code{"negbin_dispersion"}, \code{"dispersion"}
+\item Zero-part probit indices (zero-inflated count models): \code{"zero_hat_train"}, \code{"zero_hat_test"}, \code{"zero_mu_hat_train"}, \code{"zero_mu_hat_test"}, \code{"zero_tau_hat_train"}, \code{"zero_tau_hat_test"}
 \item In-sample variance forest predictions: \code{"sigma2_x_train"}, \code{"var_x_train"}
 \item Test set variance forest predictions: \code{"sigma2_x_test"}, \code{"var_x_test"}
 }

@@ -28,6 +28,9 @@
 #' @param rfx_basis_1 (Optional) Test set basis for used for prediction from an additive random effects model in the "treatment" case. Must be a matrix or vector.
 #' @param type (Optional) Aggregation level of the contrast. Options are "mean", which averages the contrast evaluations over every draw of a BCF model, and "posterior", which returns the entire matrix of posterior contrast estimates. Default: "posterior".
 #' @param scale (Optional) Scale of the contrast. Options are "linear", which returns a contrast on the original scale of the mean forest / RFX terms, and "probability", which transforms each contrast term into a probability of observing `y == 1` before taking their difference. "probability" is only valid for models fit with a probit outcome model. Default: "linear".
+#'   For count models the scales are "linear" (contrast of `log(mu)`, a log rate ratio when only the treatment differs), "rate" (`mu`), "response" (`(1 - pi) mu`, equal to "rate" for `family = "negbin"`) and "zero_probability" (`pi`, zero-inflated models).
+#' @param offset_0 (Optional) Count models only. Log-scale offset for the control arm rows.
+#' @param offset_1 (Optional) Count models only. Log-scale offset for the treatment arm rows.
 #'
 #' @return List of prediction matrices or single prediction matrix / vector, depending on the terms requested.
 #' @export
@@ -94,13 +97,24 @@ computeContrastBCFModel <- function(
   rfx_basis_0 = NULL,
   rfx_basis_1 = NULL,
   type = "posterior",
-  scale = "linear"
+  scale = "linear",
+  offset_0 = NULL,
+  offset_1 = NULL
 ) {
   # Handle mean function scale
   if (!is.character(scale)) {
     stop("scale must be a string or character vector")
   }
-  if (!(scale %in% c("linear", "probability"))) {
+  is_count <- identical(object$model_params$outcome_model$outcome, "count")
+  if (is_count) {
+    if (!(scale %in% c("linear", "rate", "response", "zero_probability"))) {
+      stop(
+        "scale must be 'linear', 'rate', 'response' or 'zero_probability' for a count model"
+      )
+    }
+  } else if (!is.null(offset_0) || !is.null(offset_1)) {
+    stop("offset_0 and offset_1 are only supported for count (negative-binomial) models")
+  } else if (!(scale %in% c("linear", "probability"))) {
     stop("scale must either be 'linear' or 'probability'")
   }
   is_probit <- object$model_params$outcome_model$link == "probit"
@@ -205,6 +219,31 @@ computeContrastBCFModel <- function(
     stop(
       "Random effects basis has a different dimension than the basis used to train this model"
     )
+  }
+
+  # Count models: contrast of y_hat on the requested scale (log rate, rate,
+  # mean response (1 - pi) mu, or zero probability), offsets included
+  if (is_count) {
+    arm_preds <- function(X, Z, propensity, rfx_group_ids, rfx_basis, offset) {
+      predict(
+        object = object,
+        X = X,
+        Z = Z,
+        propensity = propensity,
+        rfx_group_ids = rfx_group_ids,
+        rfx_basis = rfx_basis,
+        type = "posterior",
+        terms = "y_hat",
+        scale = scale,
+        offset = offset
+      )
+    }
+    contrast <- arm_preds(X_1, Z_1, propensity_1, rfx_group_ids_1, rfx_basis_1, offset_1) -
+      arm_preds(X_0, Z_0, propensity_0, rfx_group_ids_0, rfx_basis_0, offset_0)
+    if (predict_mean) {
+      return(rowMeans(contrast))
+    }
+    return(contrast)
   }
 
   # Predict for the control arm
@@ -510,6 +549,7 @@ computeContrastBARTModel <- function(
 #' @param rfx_group_ids (Optional) A vector of group IDs for random effects model. Required if the BCF model includes random effects.
 #' @param rfx_basis (Optional) A matrix of bases for random effects model. Required if the BCF model includes random effects.
 #' @param num_draws_per_sample (Optional) The number of samples to draw from the likelihood for each draw of the posterior. Defaults to a heuristic based on the number of samples in a BCF model (i.e. if the BCF model has >1000 draws, we use 1 draw from the likelihood per sample, otherwise we upsample to ensure at least 1000 posterior predictive draws).
+#' @param offset (Optional) Count models only. Log-scale offset of length `nrow(X)`. Draws are `rnbinom(mu, size = r)` with the matching posterior draws of `mu` and `r`, set to 0 with probability `pi` for a zero-inflated model.
 #'
 #' @returns Array of posterior predictive samples with dimensions (num_observations, num_posterior_samples, num_draws_per_sample) if num_draws_per_sample > 1, otherwise (num_observations, num_posterior_samples).
 #'
@@ -533,13 +573,18 @@ sampleBCFPosteriorPredictive <- function(
   propensity = NULL,
   rfx_group_ids = NULL,
   rfx_basis = NULL,
-  num_draws_per_sample = NULL
+  num_draws_per_sample = NULL,
+  offset = NULL
 ) {
   # Check the provided model object
   check_model_is_valid(model_object)
 
   # Determine whether the outcome is continuous (Gaussian) or binary (probit-link)
   is_probit <- model_object$model_params$outcome_model$link == "probit"
+  is_count <- identical(model_object$model_params$outcome_model$outcome, "count")
+  if (!is_count && !is.null(offset)) {
+    stop("offset is only supported for count (negative-binomial) models")
+  }
 
   # Check that all the necessary inputs were provided for interval computation
   needs_covariates <- TRUE
@@ -632,6 +677,64 @@ sampleBCFPosteriorPredictive <- function(
     }
   }
 
+  # Count models: negative-binomial draws with the matching dispersion draw,
+  # then (zero-inflated family) a structural zero with probability pi
+  if (is_count) {
+    mu_draws <- as.matrix(predict(
+      model_object,
+      X = X,
+      Z = Z,
+      propensity = propensity,
+      rfx_group_ids = rfx_group_ids,
+      rfx_basis = rfx_basis,
+      type = "posterior",
+      terms = "y_hat",
+      scale = "rate",
+      offset = offset
+    ))
+    num_posterior_draws <- model_object$model_params$num_samples
+    num_observations <- nrow(X)
+    ppd_draw_multiplier <- if (is.null(num_draws_per_sample)) {
+      posterior_predictive_heuristic_multiplier(
+        num_posterior_draws,
+        num_observations
+      )
+    } else {
+      num_draws_per_sample
+    }
+    ppd_vector <- rnbinom(
+      ppd_draw_multiplier * num_posterior_draws * num_observations,
+      size = rep(model_object$negbin_dispersion_samples, each = num_observations),
+      mu = as.numeric(mu_draws)
+    )
+    if (identical(model_object$model_params$outcome_model$family, "zinb")) {
+      # pi includes the zero-part random effects when the model has them
+      pi_draws <- predict(
+        model_object,
+        X = X,
+        Z = Z,
+        propensity = propensity,
+        rfx_group_ids = rfx_group_ids,
+        rfx_basis = rfx_basis,
+        type = "posterior",
+        terms = if (isTRUE(model_object$model_params$has_zero_rfx)) {
+          "y_hat"
+        } else {
+          "zero_forest"
+        },
+        scale = "zero_probability"
+      )
+      ppd_vector[runif(length(ppd_vector)) < as.numeric(pi_draws)] <- 0
+    }
+    if (ppd_draw_multiplier > 1) {
+      return(array(
+        ppd_vector,
+        dim = c(num_observations, num_posterior_draws, ppd_draw_multiplier)
+      ))
+    }
+    return(array(ppd_vector, dim = c(num_observations, num_posterior_draws)))
+  }
+
   # Compute posterior samples
   bcf_preds <- predict(
     model_object,
@@ -711,6 +814,7 @@ sampleBCFPosteriorPredictive <- function(
 #' @param rfx_group_ids A vector of group IDs for random effects model. Required if the BART model includes random effects.
 #' @param rfx_basis A matrix of bases for random effects model. Required if the BART model includes random effects.
 #' @param num_draws_per_sample The number of posterior predictive samples to draw for each posterior sample. Defaults to a heuristic based on the number of samples in a BART model (i.e. if the BART model has >1000 draws, we use 1 draw from the likelihood per sample, otherwise we upsample to ensure intervals are based on at least 1000 posterior predictive draws).
+#' @param offset (Optional) Count models only. Log-scale offset of length `nrow(X)`, as in [predict.bartmodel()]. For a count model, draws are `rnbinom(mu = exp(eta), size = r)` with `eta` the posterior linear predictor including the offset and `r` the matching dispersion draw. For a zero-inflated count model each draw is then set to 0 with the matching posterior draw of the zero probability `pi`.
 #'
 #' @returns Array of posterior predictive samples with dimensions (num_observations, num_posterior_samples, num_draws_per_sample) if num_draws_per_sample > 1, otherwise (num_observations, num_posterior_samples).
 #'
@@ -730,13 +834,18 @@ sampleBARTPosteriorPredictive <- function(
   leaf_basis = NULL,
   rfx_group_ids = NULL,
   rfx_basis = NULL,
-  num_draws_per_sample = NULL
+  num_draws_per_sample = NULL,
+  offset = NULL
 ) {
   # Check the provided model object
   check_model_is_valid(model_object)
 
   # Determine whether the outcome is continuous (Gaussian) or binary (probit-link)
   is_gaussian <- model_object$model_params$outcome_model$link == "identity"
+  is_count <- identical(model_object$model_params$outcome_model$outcome, "count")
+  if (!is_count && !is.null(offset)) {
+    stop("offset is only supported for count (negative-binomial) models")
+  }
   is_probit <- model_object$model_params$outcome_model$link == "probit"
   is_cloglog <- model_object$model_params$outcome_model$link == "cloglog"
   is_binary_cloglog <- is_cloglog &&
@@ -847,6 +956,79 @@ sampleBARTPosteriorPredictive <- function(
     # Sample from the posterior predictive distribution
     ppd_array <- sample_gaussian_predictive_draws(ppd_mean, ppd_variance,
       num_posterior_draws, num_observations, num_draws_per_sample)
+  } else if (is_count) {
+    # Posterior draws of the rate mu = exp(eta), offset included
+    mu_draws <- predict(
+      model_object,
+      X = X,
+      leaf_basis = leaf_basis,
+      rfx_group_ids = rfx_group_ids,
+      rfx_basis = rfx_basis,
+      type = "posterior",
+      terms = "y_hat",
+      scale = "rate",
+      offset = offset
+    )
+    mu_draws <- as.matrix(mu_draws)
+    num_posterior_draws <- model_object$model_params$num_samples
+    num_observations <- nrow(X)
+    if (is.null(num_draws_per_sample)) {
+      ppd_draw_multiplier <- posterior_predictive_heuristic_multiplier(
+        num_posterior_draws,
+        num_observations
+      )
+    } else {
+      ppd_draw_multiplier <- num_draws_per_sample
+    }
+    # Column s of mu_draws pairs with dispersion draw s; recycle both across
+    # the extra draws per sample
+    size_draws <- rep(
+      model_object$negbin_dispersion_samples,
+      each = num_observations
+    )
+    ppd_vector <- rnbinom(
+      ppd_draw_multiplier * num_posterior_draws * num_observations,
+      size = size_draws,
+      mu = as.numeric(mu_draws)
+    )
+    # Zero-inflated family: a structural zero with probability pi, drawn
+    # after the negative-binomial draws so that family = "negbin" is unchanged
+    if (identical(model_object$model_params$outcome_model$family, "zinb")) {
+      pi_draws <- if (isTRUE(model_object$model_params$has_zero_rfx)) {
+        # pi includes the zero-part random effects of the rows' groups
+        predict(
+          model_object,
+          X = X,
+          leaf_basis = leaf_basis,
+          rfx_group_ids = rfx_group_ids,
+          rfx_basis = rfx_basis,
+          type = "posterior",
+          terms = "y_hat",
+          scale = "zero_probability"
+        )
+      } else {
+        predict(
+          model_object,
+          X = X,
+          type = "posterior",
+          terms = "zero_forest",
+          scale = "zero_probability"
+        )
+      }
+      structural <- runif(length(ppd_vector)) < as.numeric(pi_draws)
+      ppd_vector[structural] <- 0
+    }
+    if (ppd_draw_multiplier > 1) {
+      ppd_array <- array(
+        ppd_vector,
+        dim = c(num_observations, num_posterior_draws, ppd_draw_multiplier)
+      )
+    } else {
+      ppd_array <- array(
+        ppd_vector,
+        dim = c(num_observations, num_posterior_draws)
+      )
+    }
   } else if (is_probit || is_binary_cloglog) {
     # Compute posterior probability samples
     bart_preds <- predict(

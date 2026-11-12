@@ -1444,6 +1444,13 @@ extern "C" SEXP _nashtree_ordinal_sampler_update_cumsum_exp_cpp(SEXP sampler_ptr
     return R_NilValue;
   END_CPP11
 }
+// sampler.cpp
+cpp11::writable::doubles sample_polya_gamma_cpp(cpp11::doubles b, cpp11::doubles z, cpp11::external_pointer<std::mt19937> rng);
+extern "C" SEXP _nashtree_sample_polya_gamma_cpp(SEXP b, SEXP z, SEXP rng) {
+  BEGIN_CPP11
+    return cpp11::as_sexp(sample_polya_gamma_cpp(cpp11::as_cpp<cpp11::decay_t<cpp11::doubles>>(b), cpp11::as_cpp<cpp11::decay_t<cpp11::doubles>>(z), cpp11::as_cpp<cpp11::decay_t<cpp11::external_pointer<std::mt19937>>>(rng)));
+  END_CPP11
+}
 // serialization.cpp
 cpp11::external_pointer<nlohmann::json> init_json_cpp();
 extern "C" SEXP _nashtree_init_json_cpp() {
@@ -1960,6 +1967,7 @@ static const R_CallMethodDef CallEntries[] = {
     {"_nashtree_root_reset_rfx_tracker_cpp",                          (DL_FUNC) &_nashtree_root_reset_rfx_tracker_cpp,                           4},
     {"_nashtree_sample_gfr_one_iteration_cpp",                        (DL_FUNC) &_nashtree_sample_gfr_one_iteration_cpp,                        19},
     {"_nashtree_sample_mcmc_one_iteration_cpp",                       (DL_FUNC) &_nashtree_sample_mcmc_one_iteration_cpp,                       18},
+    {"_nashtree_sample_polya_gamma_cpp",                              (DL_FUNC) &_nashtree_sample_polya_gamma_cpp,                               3},
     {"_nashtree_sample_sigma2_one_iteration_cpp",                     (DL_FUNC) &_nashtree_sample_sigma2_one_iteration_cpp,                      5},
     {"_nashtree_sample_tau_one_iteration_cpp",                        (DL_FUNC) &_nashtree_sample_tau_one_iteration_cpp,                         4},
     {"_nashtree_sample_without_replacement_integer_cpp",              (DL_FUNC) &_nashtree_sample_without_replacement_integer_cpp,               3},

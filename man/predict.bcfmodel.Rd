@@ -14,6 +14,7 @@
   type = "posterior",
   terms = "all",
   scale = "linear",
+  offset = NULL,
   ...
 )
 }
@@ -34,7 +35,7 @@ that were not in the training set.}
 
 \item{type}{(Optional) Type of prediction to return. Options are "mean", which averages the predictions from every draw of a BCF model, and "posterior", which returns the entire matrix of posterior predictions. Default: "posterior".}
 
-\item{terms}{(Optional) Which model terms to include in the prediction. Options include \code{"y_hat"}, \code{"prognostic_function"}, \code{"mu"}, \code{"cate"}, \code{"tau"}, \code{"rfx"}, \code{"variance_forest"}, or \code{"all"}.
+\item{terms}{(Optional) Which model terms to include in the prediction. Options include \code{"y_hat"}, \code{"prognostic_function"}, \code{"mu"}, \code{"cate"}, \code{"tau"}, \code{"rfx"}, \code{"variance_forest"}, \code{"zero_prognostic"}, \code{"zero_tau"}, \code{"zero_forest"}, \code{"zero_rfx"} (zero-inflated count models), or \code{"all"}.
 
 The treatment effect terms follow a three-level hierarchy:
 \itemize{
@@ -47,7 +48,9 @@ Similarly for the prognostic term: \code{"mu"} returns the prognostic forest onl
 
 If a model doesn't have random effects or variance forest predictions but one of those terms is requested, the request will simply be ignored. If none of the requested terms are present, this function will return \code{NULL} along with a warning. Default: \code{"all"}.}
 
-\item{scale}{(Optional) Scale of mean function predictions. Options are "linear", which returns predictions on the original scale of the mean forest / RFX terms, and "probability", which transforms predictions into a probability of observing \code{y == 1}. "probability" is only valid for models fit with a probit outcome model. Default: "linear".}
+\item{scale}{(Optional) Scale of mean function predictions. Options are "linear", which returns predictions on the original scale of the mean forest / RFX terms, and "probability", which transforms predictions into a probability of observing \code{y == 1}. "probability" is only valid for models fit with a probit outcome model. For count models, "linear" returns the log scale (\code{y_hat} is \code{log(mu)} with the offset, \code{mu} / \code{prognostic_function} are log baseline rates, \code{tau} / \code{cate} log rate ratios), "rate" exponentiates every term (\code{mu}, baseline rates, rate ratios, multiplicative random effects), and "response" is "rate" except that \code{y_hat} is the mean \verb{(1 - pi) mu} for a zero-inflated model. For zero-inflated models, "zero_probability" returns \code{pi} as \code{y_hat} and the zero-part terms only. The zero-part terms \code{"zero_prognostic"} (\code{c0 + mu_z(X)}), \code{"zero_tau"} (\code{tau_z(X)}) and \code{"zero_forest"} (the forests' full index \verb{c0 + mu_z(X) + tau_z(X) Z}) are probit indices on the "linear" scale; on the other scales \code{"zero_prognostic"} and \code{"zero_forest"} are probabilities and \code{"zero_tau"} stays a probit-scale coefficient. \code{"zero_rfx"} (models with zero-part random effects) is the zero part's random effect, on the probit scale on every scale; \code{pi} (and so \code{y_hat} on the "response" and "zero_probability" scales) includes it. Default: "linear".}
+
+\item{offset}{(Optional) Count models only. Log-scale offset of length \code{nrow(X)}, added to \code{y_hat}. If the model was fit with an offset and none is given, an offset of 0 is used with a warning. Default: \code{NULL}.}
 
 \item{...}{(Optional) Other prediction parameters.}
 }

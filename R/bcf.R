@@ -127,6 +127,8 @@ NULL
 #'   - `outcome_model` A structured `OutcomeModel` object that specifies the outcome type and desired link function. This argument pre-empts the legacy (deprecated) `probit_outcome_model` option. Default: `OutcomeModel(outcome='continuous', link='identity')`.
 #'   - `probit_outcome_model` Deprecated in favor of `outcome_model`. Whether or not the outcome should be modeled as explicitly binary via a probit link. If `TRUE`, `y` must only contain the values `0` and `1`. Default: `FALSE`.
 #'   - `num_threads` Number of threads to use in the GFR and MCMC algorithms, as well as prediction. Defaults to `1` (single-threaded). Set to `-1` to use the maximum number of available threads, or a positive integer for a specific count. OpenMP must be available for values other than `1`.
+#'   - `negbin_dispersion_prior_shape`, `negbin_dispersion_prior_rate`, `negbin_dispersion_init`, `sample_negbin_dispersion` Count outcomes only: the `Gamma(shape, rate)` prior on the negative-binomial size `r` (defaults `1` and `0.01`), its starting value (method of moments, or the constant-rate ZINB fit, if `NULL`) and whether to sample it (default `TRUE`), as in [bart()].
+#'   - `zero_random_effects` Zero-inflated count outcomes with `rfx_group_ids_train` only. Whether the zero part gets its own random effects on the same groups and basis as the count part (see "Count outcomes"). `FALSE` gives the model without them, draw for draw. Default: `TRUE`.
 #'
 #' @param prognostic_forest_params (Optional) A list of prognostic forest model parameters, each of which has a default value processed internally, so this argument list is optional.
 #'
@@ -161,7 +163,8 @@ NULL
 #'   - `drop_vars` Vector of variable names or column indices denoting variables that should be excluded from the forest. Default: `NULL`. If both `drop_vars` and `keep_vars` are set, `drop_vars` will be ignored.
 #'   - `num_features_subsample` How many features to subsample when growing each tree for the GFR algorithm. Defaults to the number of features in the training dataset.
 #'   - `sample_intercept` Whether to sample a global treatment effect intercept `tau_0` so the full CATE is `tau_0 + tau(X)`. Default: `TRUE`. Compatible with `adaptive_coding = TRUE`, in which case the recoded treatment basis is used.
-#'   - `tau_0_prior_var` Variance of the normal prior on `tau_0` (a scalar applied to each treatment dimension independently). Auto-calibrated to outcome variance when `NULL` and outcome is continuous. Only used when `sample_intercept = TRUE`.
+#'   - `tau_0_prior_var` Variance of the normal prior on `tau_0` (a scalar applied to each treatment dimension independently). Auto-calibrated to outcome variance when `NULL` and outcome is continuous; `1` (on the log-rate-ratio scale) for count outcomes. Only used when `sample_intercept = TRUE`.
+#'   - `log_rate_ratio_prior_sd` Count outcomes only. Prior standard deviation of the treatment forest `tau(X)`, the log rate ratio, summed over trees: `sigma2_leaf_init` defaults to `log_rate_ratio_prior_sd^2 / num_trees`. Default: `0.5`, so one prior standard deviation is a rate ratio between `exp(-0.5) = 0.61` and `exp(0.5) = 1.65`.
 #'
 #' @param variance_forest_params (Optional) A list of variance forest model parameters, each of which has a default value processed internally, so this argument list is optional.
 #'
@@ -187,6 +190,66 @@ NULL
 #'   - `group_parameter_prior_cov` Prior covariance matrix for the random effects "group parameters." Default: `NULL`. Must be a square matrix whose dimension matches the number of random effects bases, or a scalar value that will be expanded to a diagonal matrix.
 #'   - `variance_prior_shape` Shape parameter for the inverse gamma prior on the variance of the random effects "group parameter." Default: `1`.
 #'   - `variance_prior_scale` Scale parameter for the inverse gamma prior on the variance of the random effects "group parameter." Default: `1`.
+#'
+#' @param offset_train (Optional) Count outcomes only. Log-scale offset of length `nrow(X_train)` (log exposure), added to the count part's linear predictor. Default: `NULL` (no offset).
+#' @param offset_test (Optional) Count outcomes only. Offset for `X_test`. If `offset_train` is supplied and `offset_test` is not, test-set predictions use an offset of 0 with a warning.
+#' @param zero_prognostic_forest_params (Optional) Zero-inflated count outcomes only. Parameters of the probit zero-part prognostic forest: `num_trees` (default `50`), `alpha` (`0.95`), `beta` (`2`), `min_samples_leaf` (`5`), `max_depth` (`10`) and `sigma2_leaf_init` (default `2 / num_trees`, held fixed). The forest uses the variable weights (including the propensity column) of the count prognostic forest.
+#' @param zero_treatment_effect_forest_params (Optional) Zero-inflated count outcomes only. Parameters of the probit zero-part treatment forest, whose basis is the raw treatment: `num_trees` (default `25`), `alpha` (`0.25`), `beta` (`3`), `min_samples_leaf` (`5`), `max_depth` (`5`), `delta_max` (`0.5`) and `sigma2_leaf_init` (default `(delta_max / (qnorm(0.84135) dnorm(0)))^2 / num_trees`, the probit BCF calibration, held fixed). It uses the variable weights of the count treatment forest.
+#' @param zero_random_effects_params (Optional) Zero-inflated count outcomes (`family = "zinb"`) with
+#'   `rfx_group_ids_train` and `general_params$zero_random_effects = TRUE` only. The prior of the zero
+#'   part's random effects, as a list with any of the prior keys of `random_effects_params`:
+#'   `working_parameter_prior_mean`, `group_parameter_prior_mean`, `working_parameter_prior_cov`,
+#'   `group_parameter_prior_cov`, `variance_prior_shape` and `variance_prior_scale`. A key left out takes the
+#'   count part's value from `random_effects_params`, so the default `list()` gives both parts the same prior,
+#'   as before this argument existed (draw for draw). The groups, basis (`model_spec`) and unseen-group policy
+#'   are always the count part's and cannot be set here. Supplying a non-empty list for any other model is an
+#'   error.
+#'
+#'   The random effects are parameter-expanded: a group's effect is `alpha * xi_k` (per basis component),
+#'   with the working parameter `alpha ~ N(0, working_parameter_prior_cov)`, `xi_k ~ N(0, s2)` and
+#'   `s2 ~ IG(variance_prior_shape, variance_prior_scale)` (shape, scale; `1 / s2 ~ Gamma(shape, rate =
+#'   scale)`). The prior means only set the starting values. With `variance_prior_shape =
+#'   variance_prior_scale = nu / 2` the implied prior on the effect's standard deviation `|alpha| sqrt(s2)`
+#'   is a half-t with `nu` degrees of freedom and scale `sqrt(working_parameter_prior_cov)` (Gelman 2006);
+#'   `nu = 1` (shape and scale `0.5`) is a half-Cauchy with that scale. The defaults (`1`, `1`, covariance 1)
+#'   are a half-t with 2 degrees of freedom and scale 1 on the probit scale. For example,
+#'   `list(working_parameter_prior_cov = 0.094^2, variance_prior_shape = 0.5, variance_prior_scale = 0.5)`
+#'   puts a half-Cauchy(0, 0.094) prior on the SD of a zero-part random intercept.
+#'
+#' @section Count outcomes:
+#' `general_params = list(outcome_model = OutcomeModel("count", "log"))` fits
+#' `y_i ~ NB(mu_i, r)` with
+#' `log(mu_i) = offset_i + c + mu(X_i, pi_hat_i) + [tau_0 + tau(X_i)] b(Z_i) [+ random effects]`,
+#' where `b(Z)` is the treatment basis (`Z`, or the adaptive coding `b_0 (1 - Z) + b_1 Z`), so `tau_0 + tau(X)`
+#' is a log rate ratio (per unit of dose for a continuous treatment) and `c` a fixed centering constant
+#' (`model_params$outcome_mean`). Each iteration draws Pólya-Gamma variables as in [bart()], which turns the
+#' likelihood into the weighted Gaussian regression `bcf()` already fits: the prognostic forest, the
+#' treatment forest (binary or continuous dose), `tau_0`, the adaptive coding, the propensity covariate,
+#' random effects, GFR and multiple chains run on the pseudo-outcome with variance weights `1 / omega_i`
+#' and the error variance fixed at 1; `tau_0` and the coding parameters, which are sampled in R, use the
+#' precision weights `omega_i`. `r` is drawn by slice sampling as in [bart()]. A variance forest and
+#' `sample_sigma2_global = TRUE` are refused. The prognostic leaf scale is calibrated on the log scale as in
+#' [bart()], the treatment forest's through `log_rate_ratio_prior_sd`, and `tau_0` has a `N(0, 1)` prior by default.
+#'
+#' With `family = "zinb"` a zero part is added: `pi_i = Phi(c0 + mu_z(X_i, pi_hat_i) + tau_z(X_i) Z_i)` is the
+#' probability of a structural zero, with a probit prognostic forest `mu_z` and a probit treatment forest
+#' `tau_z` (four forests in all), sampled on the structural-zero indicators as in [bart()]; structural zeros
+#' drop out of the count part through infinite variance weights. The zero part has no intercept `tau_0` and
+#' no adaptive coding, and a multivariate treatment is refused. With `rfx_group_ids_train` it gets random
+#' effects of its own (unless `general_params$zero_random_effects = FALSE`): the count part's groups, basis
+#' (`model_spec`) and priors (or those of `zero_random_effects_params`), separate parameters, sampled after
+#' the zero forests on the zero part's latent
+#' residual with unit variance, and entering `pi` everywhere, as in [bart()]. As for the count part, group
+#' labels not seen in training are refused. `observation_weights` are
+#' refused with this family (with `family = "negbin"` they multiply the variance weights).
+#'
+#' `y_hat_train` holds draws of `log(mu)` including the offset, `mu_hat_train` of `c + mu(X)`, `tau_hat_train` of
+#' the log rate ratio. The zero-inflated family adds `zero_mu_hat_train` (`c0 + mu_z(X)`), `zero_tau_hat_train`
+#' (`tau_z(X)`, probit scale) and `zero_hat_train` (the full probit index, zero-part random effects included),
+#' and their test-set versions; with zero-part random effects also `zero_rfx_samples`, `zero_rfx_preds_train`
+#' and `zero_rfx_preds_test`.
+#' [predict.bcfmodel()] offers the scales `"linear"`, `"rate"`, `"response"` (`(1 - pi) mu`) and `"zero_probability"`,
+#' [computeContrastBCFModel()] contrasts on those scales, and [sampleBCFPosteriorPredictive()] draws counts.
 #'
 #' @return List of sampling outputs and a wrapper around the sampled forests (which can be used for in-memory prediction on new data, or serialized to JSON on disk).
 #' @export
@@ -259,7 +322,12 @@ bcf <- function(
   prognostic_forest_params = list(),
   treatment_effect_forest_params = list(),
   variance_forest_params = list(),
-  random_effects_params = list()
+  random_effects_params = list(),
+  offset_train = NULL,
+  offset_test = NULL,
+  zero_prognostic_forest_params = list(),
+  zero_treatment_effect_forest_params = list(),
+  zero_random_effects_params = list()
 ) {
   # Update general BCF parameters
   general_params_default <- list(
@@ -283,7 +351,12 @@ bcf <- function(
     verbose = FALSE,
     outcome_model = OutcomeModel(outcome = "continuous", link = "identity"),
     probit_outcome_model = FALSE,
-    num_threads = 1
+    num_threads = 1,
+    negbin_dispersion_prior_shape = 1,
+    negbin_dispersion_prior_rate = 0.01,
+    negbin_dispersion_init = NULL,
+    sample_negbin_dispersion = TRUE,
+    zero_random_effects = TRUE
   )
   general_params_updated <- preprocessParams(
     general_params_default,
@@ -326,7 +399,8 @@ bcf <- function(
     delta_max = 0.9,
     num_features_subsample = NULL,
     sample_intercept = TRUE,
-    tau_0_prior_var = NULL
+    tau_0_prior_var = NULL,
+    log_rate_ratio_prior_sd = 0.5
   )
   treatment_effect_forest_params_updated <- preprocessParams(
     treatment_effect_forest_params_default,
@@ -368,6 +442,31 @@ bcf <- function(
     random_effects_params
   )
 
+  # Zero-part forests (zero-inflated count outcomes only)
+  zero_prognostic_forest_params_updated <- preprocessParams(
+    list(
+      num_trees = 50,
+      alpha = 0.95,
+      beta = 2.0,
+      min_samples_leaf = 5,
+      max_depth = 10,
+      sigma2_leaf_init = NULL
+    ),
+    zero_prognostic_forest_params
+  )
+  zero_treatment_effect_forest_params_updated <- preprocessParams(
+    list(
+      num_trees = 25,
+      alpha = 0.25,
+      beta = 3.0,
+      min_samples_leaf = 5,
+      max_depth = 5,
+      sigma2_leaf_init = NULL,
+      delta_max = 0.5
+    ),
+    zero_treatment_effect_forest_params
+  )
+
   ### Unpack all parameter values
   # 1. General parameters
   cutpoint_grid_size <- general_params_updated$cutpoint_grid_size
@@ -391,6 +490,11 @@ bcf <- function(
   outcome_model <- general_params_updated$outcome_model
   probit_outcome_model <- general_params_updated$probit_outcome_model
   num_threads <- general_params_updated$num_threads
+  negbin_dispersion_prior_shape <- general_params_updated$negbin_dispersion_prior_shape
+  negbin_dispersion_prior_rate <- general_params_updated$negbin_dispersion_prior_rate
+  negbin_dispersion_init <- general_params_updated$negbin_dispersion_init
+  sample_negbin_dispersion <- general_params_updated$sample_negbin_dispersion
+  zero_random_effects <- general_params_updated$zero_random_effects
 
   # 2. Mu forest parameters
   num_trees_mu <- prognostic_forest_params_updated$num_trees
@@ -422,6 +526,7 @@ bcf <- function(
   num_features_subsample_tau <- treatment_effect_forest_params_updated$num_features_subsample
   sample_tau_0 <- treatment_effect_forest_params_updated$sample_intercept
   tau_0_prior_var <- treatment_effect_forest_params_updated$tau_0_prior_var
+  log_rate_ratio_prior_sd <- treatment_effect_forest_params_updated$log_rate_ratio_prior_sd
 
   # 4. Variance forest parameters
   num_trees_variance <- variance_forest_params_updated$num_trees
@@ -445,6 +550,11 @@ bcf <- function(
   rfx_group_parameter_prior_cov <- rfx_params_updated$group_parameter_prior_cov
   rfx_variance_prior_shape <- rfx_params_updated$variance_prior_shape
   rfx_variance_prior_scale <- rfx_params_updated$variance_prior_scale
+  .zinbCheckZeroRfxParams(zero_random_effects_params)
+
+  # 6. Zero-part forest parameters (zero-inflated count outcomes)
+  num_trees_zero_mu <- zero_prognostic_forest_params_updated$num_trees
+  num_trees_zero_tau <- zero_treatment_effect_forest_params_updated$num_trees
 
   # Raise a deprecation warning to use `outcome_model` if `probit_outcome_model = TRUE` is specified
   if (probit_outcome_model) {
@@ -457,9 +567,11 @@ bcf <- function(
   link_is_linear <- FALSE
   link_is_probit <- FALSE
   link_is_cloglog <- FALSE
+  link_is_log <- FALSE
   outcome_is_continuous <- FALSE
   outcome_is_binary <- FALSE
   outcome_is_ordinal <- FALSE
+  outcome_is_count <- FALSE
   if (
     outcome_model$outcome == "continuous" && outcome_model$link == "identity"
   ) {
@@ -480,6 +592,9 @@ bcf <- function(
   ) {
     link_is_cloglog <- TRUE
     outcome_is_ordinal <- TRUE
+  } else if (outcome_model$outcome == "count" && outcome_model$link == "log") {
+    link_is_log <- TRUE
+    outcome_is_count <- TRUE
   } else {
     stop(paste0(
       "Invalid outcome model specification, outcome = ",
@@ -487,6 +602,55 @@ bcf <- function(
       ", link = ",
       outcome_model$link
     ))
+  }
+
+  # Count outcomes: validate before changing RNG state
+  outcome_is_zinb <- link_is_log && identical(outcome_model$family, "zinb")
+  if (
+    !outcome_is_zinb &&
+      (length(zero_prognostic_forest_params) > 0 ||
+        length(zero_treatment_effect_forest_params) > 0)
+  ) {
+    stop(
+      "zero_prognostic_forest_params and zero_treatment_effect_forest_params are only used by zero-inflated count outcomes (OutcomeModel('count', 'log', family = 'zinb'))"
+    )
+  }
+  if (
+    !is.logical(zero_random_effects) ||
+      length(zero_random_effects) != 1 ||
+      is.na(zero_random_effects)
+  ) {
+    stop("general_params$zero_random_effects must be TRUE or FALSE")
+  }
+  if (!link_is_log) {
+    if (!is.null(offset_train) || !is.null(offset_test)) {
+      stop(
+        "offset_train and offset_test are only supported for count outcomes (OutcomeModel(outcome = 'count', link = 'log'))"
+      )
+    }
+  } else {
+    count_checks <- .validateBcfCountInputs(
+      y_train = y_train,
+      X_train = X_train,
+      X_test = X_test,
+      offset_train = offset_train,
+      offset_test = offset_test,
+      observation_weights = observation_weights,
+      outcome_is_zinb = outcome_is_zinb,
+      num_trees_variance = variance_forest_params_updated$num_trees,
+      general_params = general_params,
+      negbin_dispersion_prior_shape = negbin_dispersion_prior_shape,
+      negbin_dispersion_prior_rate = negbin_dispersion_prior_rate,
+      negbin_dispersion_init = negbin_dispersion_init,
+      sample_negbin_dispersion = sample_negbin_dispersion,
+      log_rate_ratio_prior_sd = log_rate_ratio_prior_sd,
+      num_trees_zero_mu = num_trees_zero_mu,
+      num_trees_zero_tau = num_trees_zero_tau,
+      zero_tau_delta_max = zero_treatment_effect_forest_params_updated$delta_max
+    )
+    negbin_offset_train <- count_checks$offset_train
+    negbin_offset_test <- count_checks$offset_test
+    sample_sigma2_global <- FALSE
   }
 
   # Handle random effects specification
@@ -601,6 +765,38 @@ bcf <- function(
     } else {
       previous_tau_0_samples <- NULL
     }
+    previous_family <- if (
+      identical(previous_bcf_model$model_params$outcome_model$outcome, "count")
+    ) {
+      previous_bcf_model$model_params$outcome_model$family
+    } else {
+      "none"
+    }
+    current_family <- if (link_is_log) outcome_model$family else "none"
+    if (!identical(previous_family, current_family)) {
+      stop(
+        "previous_model_json and the current call must use the same count family (or both a non-count outcome)"
+      )
+    }
+    previous_negbin_dispersion_samples <- previous_bcf_model$negbin_dispersion_samples
+    previous_forest_samples_zero_mu <- previous_bcf_model$forests_zero_mu
+    previous_forest_samples_zero_tau <- previous_bcf_model$forests_zero_tau
+    previous_zero_rfx_samples <- if (
+      isTRUE(previous_bcf_model$model_params$has_zero_rfx)
+    ) {
+      previous_bcf_model$zero_rfx_samples
+    } else {
+      NULL
+    }
+    if (
+      outcome_is_zinb &&
+        (previous_bcf_model$model_params$num_trees_zero_mu != num_trees_zero_mu ||
+          previous_bcf_model$model_params$num_trees_zero_tau != num_trees_zero_tau)
+    ) {
+      stop(
+        "The zero-part forests must have the same number of trees as those of previous_model_json"
+      )
+    }
     previous_model_num_samples <- previous_bcf_model$model_params$num_samples
     if (previous_model_warmstart_sample_num > previous_model_num_samples) {
       stop(
@@ -620,6 +816,10 @@ bcf <- function(
     previous_b_1_samples <- NULL
     previous_b_0_samples <- NULL
     previous_tau_0_samples <- NULL
+    previous_negbin_dispersion_samples <- NULL
+    previous_forest_samples_zero_mu <- NULL
+    previous_forest_samples_zero_tau <- NULL
+    previous_zero_rfx_samples <- NULL
   }
 
   # Determine whether conditional variance will be modeled
@@ -1118,6 +1318,11 @@ bcf <- function(
 
   # Handle multivariate treatment
   has_multivariate_treatment <- ncol(Z_train) > 1
+  if (outcome_is_zinb && has_multivariate_treatment) {
+    stop(
+      "A zero-inflated count outcome supports a univariate (binary or continuous) treatment only"
+    )
+  }
   if (has_multivariate_treatment) {
     # Disable internal propensity model and leaf scale sampling if treatment is multivariate
     if (is.null(propensity_train)) {
@@ -1197,6 +1402,14 @@ bcf <- function(
         "Only one group was provided for random effect sampling, so the random effects model is likely overkill"
       )
     }
+  }
+  # Zero-inflated family: the zero part gets its own random effects on the
+  # same groups and basis unless general_params$zero_random_effects = FALSE
+  has_zero_rfx <- outcome_is_zinb && has_rfx && zero_random_effects
+  if (length(zero_random_effects_params) > 0 && !has_zero_rfx) {
+    stop(
+      "zero_random_effects_params applies only to family = 'zinb' with rfx_group_ids_train and general_params$zero_random_effects = TRUE"
+    )
   }
   if (has_rfx_test) {
     if (rfx_model_spec == "custom") {
@@ -1542,6 +1755,98 @@ bcf <- function(
       }
     }
     current_sigma2 <- sigma2_init
+  } else if (link_is_log) {
+    # Count outcome on the log scale. y_bar_train is the fixed centering
+    # constant c of the count part (the constant-rate NB rate, or for "zinb"
+    # the log rate of the constant-rate ZINB fit) and resid_train holds the
+    # Polya-Gamma pseudo-outcome on the full log-rate scale net of the offset,
+    # as resid_train holds the latent z for probit. The first Polya-Gamma step
+    # overwrites the placeholder.
+    negbin_y <- as.numeric(y_train)
+    y_bar_train <- log(sum(negbin_y) / sum(exp(negbin_offset_train)))
+    if (outcome_is_zinb) {
+      zinb_init <- .zinbConstantFit(negbin_y, negbin_offset_train)
+      y_bar_train <- zinb_init$log_rate
+      zinb_zero_probability_init <- zinb_init$zero_probability
+      zero_outcome_mean <- qnorm(
+        min(max(zinb_zero_probability_init, 0.01), 0.99)
+      )
+      current_structural_zero <- integer(length(negbin_y))
+    }
+    y_std_train <- 1
+    standardize <- FALSE
+    resid_train <- rep(y_bar_train, length(negbin_y))
+    init_mu <- 0.0
+    sigma2_init <- 1.0
+    current_sigma2 <- sigma2_init
+    if (is.null(negbin_dispersion_init)) {
+      negbin_dispersion_init <- if (outcome_is_zinb) {
+        zinb_init$dispersion
+      } else {
+        .negbinDispersionInit(negbin_y, exp(negbin_offset_train + y_bar_train))
+      }
+    }
+    current_dispersion <- negbin_dispersion_init
+
+    # Prognostic forest: leaf scale calibrated on the log scale as for the
+    # negative-binomial BART, (R / (2 k sqrt(num_trees)))^2 with k = 2 and R
+    # the range of log1p(y)
+    log_count_range <- diff(range(log1p(negbin_y)))
+    if (!is.finite(log_count_range) || log_count_range <= 0) {
+      log_count_range <- 1
+    }
+    negbin_leaf_var_mu <- (log_count_range / (2 * 2 * sqrt(num_trees_mu)))^2
+    if (is.null(b_leaf_mu)) {
+      b_leaf_mu <- negbin_leaf_var_mu / 2
+    }
+    if (is.null(sigma2_leaf_mu)) {
+      sigma2_leaf_mu <- negbin_leaf_var_mu
+    }
+    current_leaf_scale_mu <- if (is.matrix(sigma2_leaf_mu)) {
+      sigma2_leaf_mu
+    } else {
+      as.matrix(sigma2_leaf_mu)
+    }
+
+    # Treatment forest: tau_c(x) is a log rate ratio (per unit of the treatment
+    # basis); the prior sd of the sum of the treatment trees is
+    # log_rate_ratio_prior_sd (default 0.5, i.e. a rate ratio of exp(+-0.5) =
+    # 0.61 to 1.65 at one prior sd)
+    if (is.null(sigma2_leaf_tau)) {
+      sigma2_leaf_tau <- log_rate_ratio_prior_sd^2 / num_trees_tau
+    }
+    if (is.null(b_leaf_tau)) {
+      b_leaf_tau <- if (is.matrix(sigma2_leaf_tau)) {
+        sigma2_leaf_tau[1, 1]
+      } else {
+        sigma2_leaf_tau
+      }
+    }
+    if (!is.matrix(sigma2_leaf_tau)) {
+      current_leaf_scale_tau <- as.matrix(diag(sigma2_leaf_tau, ncol(Z_train)))
+    } else {
+      if (
+        ncol(sigma2_leaf_tau) != ncol(Z_train) ||
+          nrow(sigma2_leaf_tau) != ncol(Z_train)
+      ) {
+        stop(
+          "sigma2_leaf_init for the tau forest must have the same number of columns / rows as columns in the Z_train matrix"
+        )
+      }
+      current_leaf_scale_tau <- sigma2_leaf_tau
+    }
+    # tau_0, the parametric log-rate-ratio intercept: N(0, 1) prior by default
+    if (sample_tau_0 && is.null(tau_0_prior_var)) {
+      tau_0_prior_var <- 1
+    }
+    negbin_base_variance_weights <- if (is.null(observation_weights)) {
+      rep(1, length(negbin_y))
+    } else {
+      as.numeric(observation_weights)
+    }
+    # Precision weights of the current Polya-Gamma step, used by the tau_0 and
+    # adaptive-coding updates
+    current_precision <- 1 / negbin_base_variance_weights
   } else {
     # Only standardize if user requested
     if (standardize) {
@@ -1685,7 +1990,8 @@ bcf <- function(
   if (has_rfx) {
     rfx_dataset_train <- createRandomEffectsDataset(
       rfx_group_ids_train,
-      rfx_basis_train
+      rfx_basis_train,
+      if (link_is_log) negbin_base_variance_weights else NULL
     )
     rfx_tracker_train <- createRandomEffectsTracker(rfx_group_ids_train)
     rfx_model <- createRandomEffectsModel(
@@ -1702,6 +2008,42 @@ bcf <- function(
       num_rfx_components,
       num_rfx_groups,
       rfx_tracker_train
+    )
+  }
+
+  # Zero-part random effects: same groups and basis as the count part, priors
+  # from zero_random_effects_params (default: the count part's), sampled on
+  # the probit latent residual of the zero part with unit variance (no
+  # Polya-Gamma weights)
+  if (has_zero_rfx) {
+    zero_rfx_prior <- .zinbZeroRfxPrior(
+      rfx_params_updated,
+      zero_random_effects_params,
+      num_rfx_components,
+      num_rfx_groups
+    )
+    zero_rfx_dataset_train <- createRandomEffectsDataset(
+      rfx_group_ids_train,
+      rfx_basis_train
+    )
+    zero_rfx_tracker_train <- createRandomEffectsTracker(rfx_group_ids_train)
+    zero_rfx_model <- createRandomEffectsModel(
+      num_rfx_components,
+      num_rfx_groups
+    )
+    rootResetRandomEffectsModel(
+      zero_rfx_model,
+      zero_rfx_prior$alpha_init,
+      zero_rfx_prior$xi_init,
+      zero_rfx_prior$sigma_alpha_init,
+      zero_rfx_prior$sigma_xi_init,
+      zero_rfx_prior$sigma_xi_shape,
+      zero_rfx_prior$sigma_xi_scale
+    )
+    zero_rfx_samples <- createRandomEffectSamples(
+      num_rfx_components,
+      num_rfx_groups,
+      zero_rfx_tracker_train
     )
   }
 
@@ -1725,6 +2067,12 @@ bcf <- function(
   if (sample_tau_0) {
     p_tau0 <- ncol(as.matrix(Z_train))
     tau_0_samples <- matrix(NA_real_, p_tau0, num_retained_samples)
+  }
+  if (link_is_log) {
+    negbin_dispersion_samples <- rep(NA_real_, num_retained_samples)
+  }
+  if (outcome_is_zinb) {
+    zero_mu_train_raw <- matrix(NA_real_, nrow(X_train), num_retained_samples)
   }
   muhat_train_raw <- matrix(NA_real_, nrow(X_train), num_retained_samples)
   if (include_variance_forest) {
@@ -1772,16 +2120,38 @@ bcf <- function(
     prior_var_tau0 <- diag(p_tau0) * tau_0_prior_var
   }
 
-  # Data
+  # Precision weights 1 / v_i for the tau_0 and adaptive-coding updates done
+  # in R, matching the C++ leaf statistics, which read the forest dataset's
+  # variance weights v_i as variance multipliers. A count outcome set
+  # current_precision above and its Polya-Gamma step updates it every
+  # iteration; a Gaussian outcome uses its observation_weights; NULL (no
+  # weights, or probit) keeps the unweighted sums.
+  if (!link_is_log) {
+    current_precision <- NULL
+    if (!is.null(observation_weights) && !link_is_probit) {
+      current_precision <- 1 / as.numeric(observation_weights)
+    }
+  }
+
+  # Data. A count outcome always carries variance weights (1 / omega), which
+  # the Polya-Gamma step overwrites every iteration.
   forest_dataset_train <- createForestDataset(
     X_train,
     tau_basis_train,
-    observation_weights
+    if (link_is_log) negbin_base_variance_weights else observation_weights
   )
   if (has_test) {
     forest_dataset_test <- createForestDataset(X_test, tau_basis_test)
   }
   outcome_train <- createOutcome(resid_train)
+  # Zero part of a zero-inflated count outcome: covariates (with the
+  # propensity column, as for the count forests), the raw treatment as the
+  # basis of the zero treatment forest, no variance weights, and its own
+  # latent outcome
+  if (outcome_is_zinb) {
+    forest_dataset_zero <- createForestDataset(X_train, Z_train)
+    outcome_zero <- createOutcome(rep(0, nrow(X_train)))
+  }
 
   # Random number generator (std::mt19937)
   if (is.null(random_seed)) {
@@ -1858,6 +2228,72 @@ bcf <- function(
     )
   }
 
+  # Zero-part forests: probit prognostic and treatment forests on the
+  # structural-zero indicators, latent error variance fixed at 1. They use the
+  # variable weights of the count prognostic and treatment forests.
+  if (outcome_is_zinb) {
+    sigma2_leaf_zero_mu <- zero_prognostic_forest_params_updated$sigma2_leaf_init
+    if (is.null(sigma2_leaf_zero_mu)) {
+      sigma2_leaf_zero_mu <- 2 / num_trees_zero_mu
+    }
+    sigma2_leaf_zero_tau <- zero_treatment_effect_forest_params_updated$sigma2_leaf_init
+    if (is.null(sigma2_leaf_zero_tau)) {
+      # Probit BCF calibration: P(|tau_z(x)| < delta_max / dnorm(0)) = 0.6827
+      sigma2_leaf_zero_tau <- (zero_treatment_effect_forest_params_updated$delta_max /
+        (qnorm((0.6827 + 1) / 2) * dnorm(0)))^2 /
+        num_trees_zero_tau
+    }
+    global_model_config_zero <- createGlobalModelConfig(
+      global_error_variance = 1.0
+    )
+    forest_model_config_zero_mu <- createForestModelConfig(
+      feature_types = feature_types,
+      num_trees = num_trees_zero_mu,
+      num_features = ncol(X_train),
+      num_observations = nrow(X_train),
+      variable_weights = variable_weights_mu,
+      leaf_dimension = 1,
+      alpha = zero_prognostic_forest_params_updated$alpha,
+      beta = zero_prognostic_forest_params_updated$beta,
+      min_samples_leaf = zero_prognostic_forest_params_updated$min_samples_leaf,
+      max_depth = zero_prognostic_forest_params_updated$max_depth,
+      leaf_model_type = 0,
+      leaf_model_scale = as.matrix(sigma2_leaf_zero_mu),
+      cutpoint_grid_size = cutpoint_grid_size,
+      num_features_subsample = num_features_subsample_mu
+    )
+    forest_model_config_zero_tau <- createForestModelConfig(
+      feature_types = feature_types,
+      num_trees = num_trees_zero_tau,
+      num_features = ncol(X_train),
+      num_observations = nrow(X_train),
+      variable_weights = variable_weights_tau,
+      leaf_dimension = 1,
+      alpha = zero_treatment_effect_forest_params_updated$alpha,
+      beta = zero_treatment_effect_forest_params_updated$beta,
+      min_samples_leaf = zero_treatment_effect_forest_params_updated$min_samples_leaf,
+      max_depth = zero_treatment_effect_forest_params_updated$max_depth,
+      leaf_model_type = 1,
+      leaf_model_scale = as.matrix(sigma2_leaf_zero_tau),
+      cutpoint_grid_size = cutpoint_grid_size,
+      num_features_subsample = num_features_subsample_tau
+    )
+    forest_model_zero_mu <- createForestModel(
+      forest_dataset_zero,
+      forest_model_config_zero_mu,
+      global_model_config_zero
+    )
+    forest_model_zero_tau <- createForestModel(
+      forest_dataset_zero,
+      forest_model_config_zero_tau,
+      global_model_config_zero
+    )
+    forest_samples_zero_mu <- createForestSamples(num_trees_zero_mu, 1, TRUE)
+    forest_samples_zero_tau <- createForestSamples(num_trees_zero_tau, 1, FALSE)
+    active_forest_zero_mu <- createForest(num_trees_zero_mu, 1, TRUE)
+    active_forest_zero_tau <- createForest(num_trees_zero_tau, 1, FALSE)
+  }
+
   # Container of forest samples
   forest_samples_mu <- createForestSamples(num_trees_mu, 1, TRUE)
   forest_samples_tau <- createForestSamples(
@@ -1926,6 +2362,226 @@ bcf <- function(
     )
   }
 
+  # Count outcome: Gibbs steps shared by the GFR and MCMC loops (see
+  # R/bcf_count.R and R/negbin.R)
+  if (link_is_log) {
+    if (outcome_is_zinb) {
+      active_forest_zero_mu$prepare_for_sampler(
+        forest_dataset_zero,
+        outcome_zero,
+        forest_model_zero_mu,
+        0,
+        0.0
+      )
+      active_forest_zero_tau$prepare_for_sampler(
+        forest_dataset_zero,
+        outcome_zero,
+        forest_model_zero_tau,
+        1,
+        0.0
+      )
+    }
+    # Current count-part linear predictor net of c and the offset: mu(x) +
+    # [tau_0 + tau(x)] b(z) + rfx
+    count_linear_predictor <- function() {
+      fit <- active_forest_mu$predict(forest_dataset_train) +
+        active_forest_tau$predict(forest_dataset_train)
+      if (sample_tau_0) {
+        fit <- fit + as.numeric(as.matrix(tau_basis_train) %*% tau_0)
+      }
+      if (has_rfx) {
+        fit <- fit + rfx_model$predict(rfx_dataset_train, rfx_tracker_train)
+      }
+      fit
+    }
+    # Polya-Gamma step: pseudo-outcome, residual and variance weights. Rows
+    # with s_i = 1 (zero-inflated family) get an infinite variance weight and a
+    # pseudo-outcome equal to their current fit, so they enter neither the
+    # forests, the random effects, tau_0 nor the coding parameters.
+    bcf_negbin_latent_update <- function(fit = NULL) {
+      if (is.null(fit)) {
+        fit <- count_linear_predictor()
+      }
+      log_dispersion <- log(current_dispersion)
+      psi <- negbin_offset_train + y_bar_train + fit - log_dispersion
+      active <- if (outcome_is_zinb) {
+        which(current_structural_zero == 0L)
+      } else {
+        seq_along(negbin_y)
+      }
+      omega <- sample_polya_gamma_cpp(
+        negbin_y[active] + current_dispersion,
+        psi[active],
+        rng$rng_ptr
+      )
+      pseudo <- y_bar_train + fit
+      pseudo[active] <- (negbin_y[active] - current_dispersion) / (2 * omega) +
+        log_dispersion -
+        negbin_offset_train[active]
+      resid_train <<- pseudo
+      outcome_train$update_data(pseudo - y_bar_train - fit)
+      variance_weights <- rep(Inf, length(negbin_y))
+      variance_weights[active] <- negbin_base_variance_weights[active] / omega
+      current_precision <<- 1 / variance_weights
+      forest_dataset_train$update_variance_weights(
+        variance_weights,
+        exponentiate = FALSE
+      )
+      if (has_rfx) {
+        rfx_dataset_train$update_variance_weights(
+          variance_weights,
+          exponentiate = FALSE
+        )
+      }
+      invisible(NULL)
+    }
+    # Dispersion step: r | y, mu over the rows that follow the negative binomial
+    bcf_negbin_dispersion_update <- function() {
+      if (!isTRUE(sample_negbin_dispersion)) {
+        return(current_dispersion)
+      }
+      mu <- exp(negbin_offset_train + y_bar_train + count_linear_predictor())
+      active <- if (outcome_is_zinb) {
+        current_structural_zero == 0L
+      } else {
+        rep(TRUE, length(negbin_y))
+      }
+      .negbinSampleDispersion(
+        current_dispersion,
+        negbin_y[active],
+        mu[active],
+        negbin_dispersion_prior_shape,
+        negbin_dispersion_prior_rate
+      )
+    }
+    # Zero part: structural-zero indicators, then the probit zero prognostic
+    # and treatment forests on them. Returns the count-part fit, which these
+    # steps leave unchanged, for the Polya-Gamma step.
+    bcf_zinb_zero_update <- function(gfr, keep_sample) {
+      fit <- count_linear_predictor()
+      zero_mu_pred <- active_forest_zero_mu$predict(forest_dataset_zero)
+      zero_tau_pred <- active_forest_zero_tau$predict(forest_dataset_zero)
+      eta_zero <- zero_outcome_mean + zero_mu_pred + zero_tau_pred
+      if (has_zero_rfx) {
+        eta_zero <- eta_zero +
+          zero_rfx_model$predict(zero_rfx_dataset_train, zero_rfx_tracker_train)
+      }
+      s <- .zinbSampleStructuralZeros(
+        negbin_y,
+        negbin_offset_train + y_bar_train + fit,
+        eta_zero,
+        current_dispersion
+      )
+      z <- .probitLatentDraw(eta_zero, s)
+      outcome_zero$update_data(z - eta_zero)
+      forest_model_zero_mu$sample_one_iteration(
+        forest_dataset = forest_dataset_zero,
+        residual = outcome_zero,
+        forest_samples = forest_samples_zero_mu,
+        active_forest = active_forest_zero_mu,
+        rng = rng,
+        forest_model_config = forest_model_config_zero_mu,
+        global_model_config = global_model_config_zero,
+        num_threads = num_threads,
+        keep_forest = keep_sample,
+        gfr = gfr
+      )
+      if (keep_sample) {
+        zero_mu_train_raw[,
+          sample_counter
+        ] <<- forest_model_zero_mu$get_cached_forest_predictions()
+      }
+      forest_model_zero_tau$sample_one_iteration(
+        forest_dataset = forest_dataset_zero,
+        residual = outcome_zero,
+        forest_samples = forest_samples_zero_tau,
+        active_forest = active_forest_zero_tau,
+        rng = rng,
+        forest_model_config = forest_model_config_zero_tau,
+        global_model_config = global_model_config_zero,
+        num_threads = num_threads,
+        keep_forest = keep_sample,
+        gfr = gfr
+      )
+      # Zero-part random effects on the latent residual, with the latent
+      # error variance fixed at 1
+      if (has_zero_rfx) {
+        zero_rfx_model$sample_random_effect(
+          zero_rfx_dataset_train,
+          outcome_zero,
+          zero_rfx_tracker_train,
+          zero_rfx_samples,
+          keep_sample,
+          1.0,
+          rng
+        )
+      }
+      current_structural_zero <<- s
+      fit
+    }
+    # Reset the zero-part forests at the start of a chain
+    bcf_zinb_reset_zero_forests <- function(samples_mu, samples_tau, index) {
+      if (is.null(samples_mu)) {
+        resetActiveForest(active_forest_zero_mu)
+        active_forest_zero_mu$set_root_leaves(0)
+        resetActiveForest(active_forest_zero_tau)
+        active_forest_zero_tau$set_root_leaves(0)
+      } else {
+        resetActiveForest(active_forest_zero_mu, samples_mu, index)
+        resetActiveForest(active_forest_zero_tau, samples_tau, index)
+      }
+      resetForestModel(
+        forest_model_zero_mu,
+        active_forest_zero_mu,
+        forest_dataset_zero,
+        outcome_zero,
+        TRUE
+      )
+      resetForestModel(
+        forest_model_zero_tau,
+        active_forest_zero_tau,
+        forest_dataset_zero,
+        outcome_zero,
+        TRUE
+      )
+    }
+    # Reset the zero-part random effects at the start of a chain: from draw
+    # `index` of `samples`, or to their initial values when samples is NULL
+    bcf_zinb_reset_zero_rfx <- function(samples, index) {
+      if (is.null(samples)) {
+        rootResetRandomEffectsModel(
+          zero_rfx_model,
+          zero_rfx_prior$alpha_init,
+          zero_rfx_prior$xi_init,
+          zero_rfx_prior$sigma_alpha_init,
+          zero_rfx_prior$sigma_xi_init,
+          zero_rfx_prior$sigma_xi_shape,
+          zero_rfx_prior$sigma_xi_scale
+        )
+        rootResetRandomEffectsTracker(
+          zero_rfx_tracker_train,
+          zero_rfx_model,
+          zero_rfx_dataset_train,
+          outcome_zero
+        )
+      } else {
+        resetRandomEffectsModel(
+          zero_rfx_model,
+          samples,
+          index,
+          zero_rfx_prior$sigma_alpha_init
+        )
+        resetRandomEffectsTracker(
+          zero_rfx_tracker_train,
+          zero_rfx_model,
+          zero_rfx_dataset_train,
+          outcome_zero,
+          samples
+        )
+      }
+    }
+  }
+
   # Run GFR (warm start) if specified
   if (num_gfr > 0) {
     for (i in 1:num_gfr) {
@@ -1976,6 +2632,13 @@ bcf <- function(
 
         # Update outcome: center z by y_bar_train before passing to forests
         outcome_train$update_data(resid_train - y_bar_train - outcome_pred)
+      }
+      if (outcome_is_zinb) {
+        bcf_negbin_latent_update(
+          bcf_zinb_zero_update(gfr = TRUE, keep_sample = keep_sample)
+        )
+      } else if (link_is_log) {
+        bcf_negbin_latent_update()
       }
 
       # Sample the prognostic forest
@@ -2037,7 +2700,7 @@ bcf <- function(
         tau_x_full <- rowSums(Z_basis_mat * as.matrix(tau_x_raw_tau0))
         # For probit, resid_train holds the full-scale latent z; center it so that
         # tau_0 does not absorb the probit intercept y_bar_train.
-        resid_for_tau0 <- if (link_is_probit) {
+        resid_for_tau0 <- if (link_is_probit || link_is_log) {
           resid_train - y_bar_train
         } else {
           resid_train
@@ -2051,12 +2714,15 @@ bcf <- function(
               rfx_model$predict(rfx_dataset_train, rfx_tracker_train)
             )
         }
-        Ztr_tau0 <- t(Z_basis_mat) %*% as.matrix(partial_resid_tau0)
-        ZtZ_current <- crossprod(Z_basis_mat)
-        Sigma_post <- solve(
-          ZtZ_current / current_sigma2 + diag(p_tau0) / tau_0_prior_var
+        tau_0_post <- bcf_tau_0_posterior(
+          Z_basis_mat,
+          partial_resid_tau0,
+          current_precision,
+          current_sigma2,
+          tau_0_prior_var
         )
-        mu_post_tau0 <- as.numeric(Sigma_post %*% Ztr_tau0 / current_sigma2)
+        Sigma_post <- tau_0_post$cov
+        mu_post_tau0 <- tau_0_post$mean
         if (p_tau0 == 1) {
           tau_0_new <- rnorm(1, mu_post_tau0, sqrt(as.numeric(Sigma_post)))
         } else {
@@ -2103,7 +2769,7 @@ bcf <- function(
         )
         # For probit, resid_train holds full-scale z; center it so b_0/b_1 do not
         # absorb the probit intercept y_bar_train.
-        resid_for_coding <- if (link_is_probit) {
+        resid_for_coding <- if (link_is_probit || link_is_log) {
           resid_train - y_bar_train
         } else {
           resid_train
@@ -2125,14 +2791,16 @@ bcf <- function(
         } else {
           tau_x_raw_train
         }
-        s_tt0 <- sum(tau_x_for_coding * tau_x_for_coding * (Z_train == 0))
-        s_tt1 <- sum(tau_x_for_coding * tau_x_for_coding * (Z_train == 1))
-        s_ty0 <- sum(
-          tau_x_for_coding * partial_resid_mu_train * (Z_train == 0)
+        coding_stats <- bcf_coding_suff_stats(
+          tau_x_for_coding,
+          partial_resid_mu_train,
+          Z_train,
+          current_precision
         )
-        s_ty1 <- sum(
-          tau_x_for_coding * partial_resid_mu_train * (Z_train == 1)
-        )
+        s_tt0 <- coding_stats$s_tt0
+        s_tt1 <- coding_stats$s_tt1
+        s_ty0 <- coding_stats$s_ty0
+        s_ty1 <- coding_stats$s_ty1
 
         # Sample b0 (coefficient on tau_total(X)(1-Z)) and b1 (coefficient on tau_total(X)Z)
         current_b_0 <- rnorm(
@@ -2228,8 +2896,8 @@ bcf <- function(
             sample_counter
           ] <- leaf_scale_tau_double
         }
-        forest_model_config_mu$update_leaf_model_scale(
-          current_leaf_scale_mu
+        forest_model_config_tau$update_leaf_model_scale(
+          current_leaf_scale_tau
         )
       }
 
@@ -2244,6 +2912,12 @@ bcf <- function(
           current_sigma2,
           rng
         )
+      }
+      if (link_is_log) {
+        current_dispersion <- bcf_negbin_dispersion_update()
+        if (keep_sample) {
+          negbin_dispersion_samples[sample_counter] <- current_dispersion
+        }
       }
     }
   }
@@ -2368,6 +3042,19 @@ bcf <- function(
           global_model_config$update_global_error_variance(
             current_sigma2
           )
+        }
+        if (link_is_log) {
+          current_dispersion <- negbin_dispersion_samples[forest_ind + 1]
+        }
+        if (outcome_is_zinb) {
+          bcf_zinb_reset_zero_forests(
+            forest_samples_zero_mu,
+            forest_samples_zero_tau,
+            forest_ind
+          )
+          if (has_zero_rfx) {
+            bcf_zinb_reset_zero_rfx(zero_rfx_samples, forest_ind)
+          }
         }
       } else if (has_prev_model) {
         warmstart_index <- ifelse(
@@ -2529,6 +3216,31 @@ bcf <- function(
             current_sigma2
           )
         }
+        if (link_is_log && !is.null(previous_negbin_dispersion_samples)) {
+          current_dispersion <- previous_negbin_dispersion_samples[
+            warmstart_index
+          ]
+        }
+        if (outcome_is_zinb) {
+          bcf_zinb_reset_zero_forests(
+            previous_forest_samples_zero_mu,
+            previous_forest_samples_zero_tau,
+            warmstart_index - 1
+          )
+          if (has_zero_rfx) {
+            if (is.null(previous_zero_rfx_samples)) {
+              warning(
+                "`previous_model_json` did not have any zero-part random effects samples, so the zero-part RFX sampler will be run from scratch while the forests and any other parameters are warm started"
+              )
+              bcf_zinb_reset_zero_rfx(NULL, NULL)
+            } else {
+              bcf_zinb_reset_zero_rfx(
+                previous_zero_rfx_samples,
+                warmstart_index - 1
+              )
+            }
+          }
+        }
       } else {
         resetActiveForest(active_forest_mu)
         active_forest_mu$set_root_leaves(init_mu / num_trees_mu)
@@ -2631,6 +3343,15 @@ bcf <- function(
             current_sigma2
           )
         }
+        if (link_is_log) {
+          current_dispersion <- negbin_dispersion_init
+        }
+        if (outcome_is_zinb) {
+          bcf_zinb_reset_zero_forests(NULL, NULL, NULL)
+          if (has_zero_rfx) {
+            bcf_zinb_reset_zero_rfx(NULL, NULL)
+          }
+        }
       }
       for (i in (num_gfr + 1):num_samples) {
         is_mcmc <- i > (num_gfr + num_burnin)
@@ -2730,6 +3451,13 @@ bcf <- function(
           # Update outcome: center z by y_bar_train before passing to forests
           outcome_train$update_data(resid_train - y_bar_train - outcome_pred)
         }
+        if (outcome_is_zinb) {
+          bcf_negbin_latent_update(
+            bcf_zinb_zero_update(gfr = FALSE, keep_sample = keep_sample)
+          )
+        } else if (link_is_log) {
+          bcf_negbin_latent_update()
+        }
 
         # Sample the prognostic forest
         forest_model_mu$sample_one_iteration(
@@ -2792,7 +3520,7 @@ bcf <- function(
           tau_x_full <- rowSums(Z_basis_mat * as.matrix(tau_x_raw_tau0))
           # For probit, resid_train holds the full-scale latent z; center it so that
           # tau_0 does not absorb the probit intercept y_bar_train.
-          resid_for_tau0 <- if (link_is_probit) {
+          resid_for_tau0 <- if (link_is_probit || link_is_log) {
             resid_train - y_bar_train
           } else {
             resid_train
@@ -2806,12 +3534,15 @@ bcf <- function(
                 rfx_model$predict(rfx_dataset_train, rfx_tracker_train)
               )
           }
-          Ztr_tau0 <- t(Z_basis_mat) %*% as.matrix(partial_resid_tau0)
-          ZtZ_current <- crossprod(Z_basis_mat)
-          Sigma_post <- solve(
-            ZtZ_current / current_sigma2 + diag(p_tau0) / tau_0_prior_var
+          tau_0_post <- bcf_tau_0_posterior(
+            Z_basis_mat,
+            partial_resid_tau0,
+            current_precision,
+            current_sigma2,
+            tau_0_prior_var
           )
-          mu_post_tau0 <- as.numeric(Sigma_post %*% Ztr_tau0 / current_sigma2)
+          Sigma_post <- tau_0_post$cov
+          mu_post_tau0 <- tau_0_post$mean
           if (p_tau0 == 1) {
             tau_0_new <- rnorm(1, mu_post_tau0, sqrt(as.numeric(Sigma_post)))
           } else {
@@ -2858,7 +3589,7 @@ bcf <- function(
           )
           # For probit, resid_train holds full-scale z; center it so b_0/b_1 do not
           # absorb the probit intercept y_bar_train.
-          resid_for_coding <- if (link_is_probit) {
+          resid_for_coding <- if (link_is_probit || link_is_log) {
             resid_train - y_bar_train
           } else {
             resid_train
@@ -2880,22 +3611,16 @@ bcf <- function(
           } else {
             tau_x_raw_train
           }
-          s_tt0 <- sum(
-            tau_x_for_coding * tau_x_for_coding * (Z_train == 0)
+          coding_stats <- bcf_coding_suff_stats(
+            tau_x_for_coding,
+            partial_resid_mu_train,
+            Z_train,
+            current_precision
           )
-          s_tt1 <- sum(
-            tau_x_for_coding * tau_x_for_coding * (Z_train == 1)
-          )
-          s_ty0 <- sum(
-            tau_x_for_coding *
-              partial_resid_mu_train *
-              (Z_train == 0)
-          )
-          s_ty1 <- sum(
-            tau_x_for_coding *
-              partial_resid_mu_train *
-              (Z_train == 1)
-          )
+          s_tt0 <- coding_stats$s_tt0
+          s_tt1 <- coding_stats$s_tt1
+          s_ty0 <- coding_stats$s_ty0
+          s_ty1 <- coding_stats$s_ty1
 
           # Sample b0 (coefficient on tau_total(X)(1-Z)) and b1 (coefficient on tau_total(X)Z)
           current_b_0 <- rnorm(
@@ -3010,6 +3735,12 @@ bcf <- function(
             rng
           )
         }
+        if (link_is_log) {
+          current_dispersion <- bcf_negbin_dispersion_update()
+          if (keep_sample) {
+            negbin_dispersion_samples[sample_counter] <- current_dispersion
+          }
+        }
       }
     }
   }
@@ -3022,9 +3753,27 @@ bcf <- function(
       if (include_variance_forest) {
         forest_samples_variance$delete_sample(0)
       }
+      if (outcome_is_zinb) {
+        forest_samples_zero_mu$delete_sample(0)
+        forest_samples_zero_tau$delete_sample(0)
+      }
       if (has_rfx) {
         rfx_samples$delete_sample(0)
       }
+      if (has_zero_rfx) {
+        zero_rfx_samples$delete_sample(0)
+      }
+    }
+    if (link_is_log) {
+      negbin_dispersion_samples <- negbin_dispersion_samples[
+        (num_gfr + 1):length(negbin_dispersion_samples)
+      ]
+    }
+    if (outcome_is_zinb) {
+      zero_mu_train_raw <- zero_mu_train_raw[,
+        (num_gfr + 1):ncol(zero_mu_train_raw),
+        drop = FALSE
+      ]
     }
     if (sample_sigma2_global) {
       global_var_samples <- global_var_samples[
@@ -3211,6 +3960,48 @@ bcf <- function(
     y_hat_test <- y_hat_test + rfx_preds_test
   }
 
+  # Count outcome: y_hat holds the full log rate log(mu), offset included;
+  # mu_hat is c + mu(x) and tau_hat the log rate ratio (tau_0 + tau(x))
+  if (link_is_log) {
+    y_hat_train <- y_hat_train + negbin_offset_train
+    if (has_test) {
+      y_hat_test <- y_hat_test + negbin_offset_test
+    }
+  }
+
+  # Zero part: probit indices c0 + mu_z(x) and tau_z(x), and the full index
+  # c0 + mu_z(x) + tau_z(x) z of the zero probability pi = Phi(.)
+  if (outcome_is_zinb) {
+    zero_mu_hat_train <- zero_mu_train_raw + zero_outcome_mean
+    zero_tau_hat_train <- forest_samples_zero_tau$predict_raw(forest_dataset_zero)
+    zero_hat_train <- zero_mu_hat_train +
+      zero_tau_hat_train * as.numeric(Z_train)
+    if (has_test) {
+      zero_mu_hat_test <- forest_samples_zero_mu$predict(forest_dataset_test) +
+        zero_outcome_mean
+      zero_tau_hat_test <- forest_samples_zero_tau$predict_raw(
+        forest_dataset_test
+      )
+      zero_hat_test <- zero_mu_hat_test +
+        zero_tau_hat_test * as.numeric(Z_test)
+    }
+  }
+  # Zero-part random effects enter the full probit index on both sets
+  if (has_zero_rfx) {
+    zero_rfx_preds_train <- zero_rfx_samples$predict(
+      rfx_group_ids_train,
+      rfx_basis_train
+    )
+    zero_hat_train <- zero_hat_train + zero_rfx_preds_train
+    if (has_rfx_test && has_test) {
+      zero_rfx_preds_test <- zero_rfx_samples$predict(
+        rfx_group_ids_test,
+        rfx_basis_test
+      )
+      zero_hat_test <- zero_hat_test + zero_rfx_preds_test
+    }
+  }
+
   # Global error variance
   if (sample_sigma2_global) {
     sigma2_global_samples <- global_var_samples * (y_std_train^2)
@@ -3306,6 +4097,23 @@ bcf <- function(
     "outcome_model" = outcome_model,
     "rfx_model_spec" = rfx_model_spec
   )
+  if (link_is_log) {
+    model_params[["has_offset"]] <- !is.null(offset_train)
+    model_params[["negbin_dispersion_prior_shape"]] <- negbin_dispersion_prior_shape
+    model_params[["negbin_dispersion_prior_rate"]] <- negbin_dispersion_prior_rate
+    model_params[["negbin_dispersion_init"]] <- negbin_dispersion_init
+    model_params[["sample_negbin_dispersion"]] <- isTRUE(sample_negbin_dispersion)
+    model_params[["log_rate_ratio_prior_sd"]] <- log_rate_ratio_prior_sd
+  }
+  if (outcome_is_zinb) {
+    model_params[["zero_outcome_mean"]] <- zero_outcome_mean
+    model_params[["zinb_zero_probability_init"]] <- zinb_zero_probability_init
+    model_params[["num_trees_zero_mu"]] <- num_trees_zero_mu
+    model_params[["num_trees_zero_tau"]] <- num_trees_zero_tau
+    model_params[["sigma2_leaf_zero_mu"]] <- sigma2_leaf_zero_mu
+    model_params[["sigma2_leaf_zero_tau"]] <- sigma2_leaf_zero_tau
+    model_params[["has_zero_rfx"]] <- has_zero_rfx
+  }
   result <- list(
     "forests_mu" = forest_samples_mu,
     "forests_tau" = forest_samples_tau,
@@ -3356,6 +4164,28 @@ bcf <- function(
   if (internal_propensity_model) {
     result[["bart_propensity_model"]] = bart_model_propensity
   }
+  if (link_is_log) {
+    result[["negbin_dispersion_samples"]] = negbin_dispersion_samples
+  }
+  if (outcome_is_zinb) {
+    result[["forests_zero_mu"]] = forest_samples_zero_mu
+    result[["forests_zero_tau"]] = forest_samples_zero_tau
+    result[["zero_mu_hat_train"]] = zero_mu_hat_train
+    result[["zero_tau_hat_train"]] = zero_tau_hat_train
+    result[["zero_hat_train"]] = zero_hat_train
+    if (has_test) {
+      result[["zero_mu_hat_test"]] = zero_mu_hat_test
+      result[["zero_tau_hat_test"]] = zero_tau_hat_test
+      result[["zero_hat_test"]] = zero_hat_test
+    }
+    if (has_zero_rfx) {
+      result[["zero_rfx_samples"]] = zero_rfx_samples
+      result[["zero_rfx_preds_train"]] = zero_rfx_preds_train
+      if (has_rfx_test && has_test) {
+        result[["zero_rfx_preds_test"]] = zero_rfx_preds_test
+      }
+    }
+  }
   class(result) <- "bcfmodel"
 
   # Restore global RNG state if user provided a random seed
@@ -3383,7 +4213,7 @@ bcf <- function(
 #' that were not in the training set.
 #' @param rfx_basis (Optional) Test set basis for "random-slope" regression in additive random effects model. If the model was sampled with a random effects `model_spec` of "intercept_only" or "intercept_plus_treatment", this is optional, but if it is provided, it will be used.
 #' @param type (Optional) Type of prediction to return. Options are "mean", which averages the predictions from every draw of a BCF model, and "posterior", which returns the entire matrix of posterior predictions. Default: "posterior".
-#' @param terms (Optional) Which model terms to include in the prediction. Options include `"y_hat"`, `"prognostic_function"`, `"mu"`, `"cate"`, `"tau"`, `"rfx"`, `"variance_forest"`, or `"all"`.
+#' @param terms (Optional) Which model terms to include in the prediction. Options include `"y_hat"`, `"prognostic_function"`, `"mu"`, `"cate"`, `"tau"`, `"rfx"`, `"variance_forest"`, `"zero_prognostic"`, `"zero_tau"`, `"zero_forest"`, `"zero_rfx"` (zero-inflated count models), or `"all"`.
 #'
 #'   The treatment effect terms follow a three-level hierarchy:
 #'   \itemize{
@@ -3395,7 +4225,8 @@ bcf <- function(
 #'   Similarly for the prognostic term: `"mu"` returns the prognostic forest only, while `"prognostic_function"` additionally folds in the random intercept when `rfx_model_spec` is `"intercept_only"` or `"intercept_plus_treatment"`; otherwise the two are identical.
 #'
 #'   If a model doesn't have random effects or variance forest predictions but one of those terms is requested, the request will simply be ignored. If none of the requested terms are present, this function will return `NULL` along with a warning. Default: `"all"`.
-#' @param scale (Optional) Scale of mean function predictions. Options are "linear", which returns predictions on the original scale of the mean forest / RFX terms, and "probability", which transforms predictions into a probability of observing `y == 1`. "probability" is only valid for models fit with a probit outcome model. Default: "linear".
+#' @param scale (Optional) Scale of mean function predictions. Options are "linear", which returns predictions on the original scale of the mean forest / RFX terms, and "probability", which transforms predictions into a probability of observing `y == 1`. "probability" is only valid for models fit with a probit outcome model. For count models, "linear" returns the log scale (`y_hat` is `log(mu)` with the offset, `mu` / `prognostic_function` are log baseline rates, `tau` / `cate` log rate ratios), "rate" exponentiates every term (`mu`, baseline rates, rate ratios, multiplicative random effects), and "response" is "rate" except that `y_hat` is the mean `(1 - pi) mu` for a zero-inflated model. For zero-inflated models, "zero_probability" returns `pi` as `y_hat` and the zero-part terms only. The zero-part terms `"zero_prognostic"` (`c0 + mu_z(X)`), `"zero_tau"` (`tau_z(X)`) and `"zero_forest"` (the forests' full index `c0 + mu_z(X) + tau_z(X) Z`) are probit indices on the "linear" scale; on the other scales `"zero_prognostic"` and `"zero_forest"` are probabilities and `"zero_tau"` stays a probit-scale coefficient. `"zero_rfx"` (models with zero-part random effects) is the zero part's random effect, on the probit scale on every scale; `pi` (and so `y_hat` on the "response" and "zero_probability" scales) includes it. Default: "linear".
+#' @param offset (Optional) Count models only. Log-scale offset of length `nrow(X)`, added to `y_hat`. If the model was fit with an offset and none is given, an offset of 0 is used with a warning. Default: `NULL`.
 #' @param ... (Optional) Other prediction parameters.
 #'
 #' @return List of prediction matrices or single prediction matrix / vector, depending on the terms requested.
@@ -3457,15 +4288,41 @@ predict.bcfmodel <- function(
   type = "posterior",
   terms = "all",
   scale = "linear",
+  offset = NULL,
   ...
 ) {
   # Handle mean function scale
   if (!is.character(scale)) {
     stop("scale must be a string or character vector")
   }
-  if (!(scale %in% c("linear", "probability"))) {
+  is_count <- identical(object$model_params$outcome_model$outcome, "count")
+  is_zinb <- is_count && identical(object$model_params$outcome_model$family, "zinb")
+  if (is_count) {
+    if (!(scale %in% c("linear", "rate", "response", "zero_probability"))) {
+      stop(
+        "scale must be 'linear', 'rate' or 'response' for a count model ('zero_probability' for a zero-inflated one)"
+      )
+    }
+    if (scale == "zero_probability" && !is_zinb) {
+      stop(
+        "scale can only be 'zero_probability' for a zero-inflated count model (family = 'zinb')"
+      )
+    }
+  } else {
+    if (!is.null(offset)) {
+      stop("offset is only supported for count (negative-binomial) models")
+    }
+    if (scale %in% c("rate", "response", "zero_probability")) {
+      stop(
+        "scale can only be 'rate', 'response' or 'zero_probability' for a count model"
+      )
+    }
+  }
+  if (!(scale %in% c("linear", "probability", "rate", "response", "zero_probability"))) {
     stop("scale must either be 'linear' or 'probability'")
   }
+  rate_scale <- is_count && (scale %in% c("rate", "response"))
+  zero_probability_scale <- scale == "zero_probability"
   is_probit <- object$model_params$outcome_model$link == "probit"
   if ((scale == "probability") && (!is_probit)) {
     stop(
@@ -3520,6 +4377,10 @@ predict.bcfmodel <- function(
           "tau",
           "rfx",
           "variance_forest",
+          "zero_prognostic",
+          "zero_tau",
+          "zero_forest",
+          "zero_rfx",
           "all"
         ))
     ) {
@@ -3553,6 +4414,26 @@ predict.bcfmodel <- function(
   predict_variance_forest <- (((has_variance_forest) &&
     ("variance_forest" %in% terms)) ||
     ((has_variance_forest) && ("all" %in% terms)))
+  # Zero-inflated count models: zero-part terms. On the zero-probability scale
+  # only y_hat (= pi) and the zero-part terms are defined, and "all" is
+  # narrowed to them.
+  if (zero_probability_scale) {
+    if (any(c("mu", "tau", "prognostic_function", "cate", "rfx") %in% terms)) {
+      stop(
+        "scale = 'zero_probability' is only defined for the 'y_hat', 'zero_prognostic', 'zero_tau', 'zero_forest' and 'zero_rfx' terms"
+      )
+    }
+    predict_mu_forest <- FALSE
+    predict_tau_forest <- FALSE
+    predict_prog_function <- FALSE
+    predict_cate_function <- FALSE
+    predict_rfx <- FALSE
+  }
+  predict_zero_mu <- is_zinb && any(c("zero_prognostic", "all") %in% terms)
+  predict_zero_tau <- is_zinb && any(c("zero_tau", "all") %in% terms)
+  predict_zero_forest <- is_zinb && any(c("zero_forest", "all") %in% terms)
+  has_zero_rfx <- is_zinb && isTRUE(object$model_params$has_zero_rfx)
+  predict_zero_rfx <- has_zero_rfx && any(c("zero_rfx", "all") %in% terms)
   predict_count <- sum(c(
     predict_y_hat,
     predict_mu_forest,
@@ -3560,7 +4441,11 @@ predict.bcfmodel <- function(
     predict_tau_forest,
     predict_cate_function,
     predict_rfx,
-    predict_variance_forest
+    predict_variance_forest,
+    predict_zero_mu,
+    predict_zero_tau,
+    predict_zero_forest,
+    predict_zero_rfx
   ))
   if (predict_count == 0) {
     warning(paste0(
@@ -3569,6 +4454,12 @@ predict.bcfmodel <- function(
       ", were fit in this model"
     ))
     return(NULL)
+  }
+  # On the zero-probability scale y_hat comes from the zero part alone, so the
+  # count-part terms are not computed for it
+  y_hat_from_zero_part <- zero_probability_scale && predict_y_hat
+  if (y_hat_from_zero_part) {
+    predict_y_hat <- FALSE
   }
   predict_rfx_intermediate <- (predict_y_hat && has_rfx)
   predict_rfx_raw <- ((predict_prog_function && has_rfx && rfx_intercept) ||
@@ -3914,8 +4805,109 @@ predict.bcfmodel <- function(
     }
   }
 
+  # Count outcomes: offset, rate scale and zero part
+  if (is_count) {
+    if (y_hat_from_zero_part) {
+      predict_y_hat <- TRUE
+    }
+    if (is.null(offset)) {
+      if (
+        isTRUE(object$model_params$has_offset) &&
+          predict_y_hat &&
+          !zero_probability_scale
+      ) {
+        warning(
+          "This model was fit with an offset but none was supplied; predictions use an offset of 0 (unit exposure)"
+        )
+      }
+      offset <- rep(0, nrow(X))
+    } else {
+      offset <- .validateNegbinOffset(offset, nrow(X), "offset")
+    }
+    if (predict_y_hat && !y_hat_from_zero_part) {
+      y_hat <- y_hat + offset
+    }
+    if (rate_scale) {
+      if (predict_y_hat) {
+        y_hat <- exp(y_hat)
+      }
+      if (predict_mu_forest) {
+        mu_hat <- exp(mu_hat)
+      }
+      if (predict_tau_forest) {
+        tau_hat <- exp(tau_hat)
+      }
+      if (predict_prog_function) {
+        prognostic_function <- exp(prognostic_function)
+      }
+      if (predict_cate_function) {
+        cate <- exp(cate)
+      }
+      if (predict_rfx) {
+        rfx_predictions <- exp(rfx_predictions)
+      }
+    }
+    zero_part_enters_y_hat <- is_zinb && predict_y_hat &&
+      scale %in% c("response", "zero_probability")
+    needs_zero_part <- is_zinb &&
+      (predict_zero_mu ||
+        predict_zero_tau ||
+        predict_zero_forest ||
+        predict_zero_rfx ||
+        zero_part_enters_y_hat)
+    if (needs_zero_part) {
+      zero_mu_linear <- object$forests_zero_mu$predict(forest_dataset_pred) +
+        object$model_params$zero_outcome_mean
+      zero_tau_linear <- object$forests_zero_tau$predict_raw(
+        forest_dataset_pred
+      )
+      zero_linear <- zero_mu_linear + zero_tau_linear * as.numeric(Z)
+      # Zero-part random effects (probit scale on every prediction scale)
+      # shift the probit index of pi that enters y_hat
+      zero_index <- zero_linear
+      if (has_zero_rfx && (predict_zero_rfx || zero_part_enters_y_hat)) {
+        zero_rfx_predictions <- object$zero_rfx_samples$predict(
+          rfx_group_ids,
+          rfx_basis
+        )
+        zero_index <- zero_linear + zero_rfx_predictions
+      }
+      if (predict_y_hat && scale == "response") {
+        y_hat <- (1 - pnorm(zero_index)) * y_hat
+      }
+      if (y_hat_from_zero_part) {
+        y_hat <- pnorm(zero_index)
+      }
+      if (predict_zero_mu) {
+        zero_prognostic <- if (scale == "linear") {
+          zero_mu_linear
+        } else {
+          pnorm(zero_mu_linear)
+        }
+      }
+      if (predict_zero_tau) {
+        zero_tau <- zero_tau_linear
+      }
+      if (predict_zero_forest) {
+        zero_forest <- if (scale == "linear") zero_linear else pnorm(zero_linear)
+      }
+    }
+  }
+
   # Collapse to posterior mean predictions if requested
   if (predict_mean) {
+    if (predict_zero_mu) {
+      zero_prognostic <- rowMeans(zero_prognostic)
+    }
+    if (predict_zero_tau) {
+      zero_tau <- rowMeans(zero_tau)
+    }
+    if (predict_zero_forest) {
+      zero_forest <- rowMeans(zero_forest)
+    }
+    if (predict_zero_rfx) {
+      zero_rfx_predictions <- rowMeans(zero_rfx_predictions)
+    }
     if (predict_mu_forest) {
       mu_hat <- rowMeans(mu_hat)
     }
@@ -3960,6 +4952,14 @@ predict.bcfmodel <- function(
       return(rfx_predictions)
     } else if (predict_variance_forest) {
       return(variance_forest_predictions)
+    } else if (predict_zero_mu) {
+      return(zero_prognostic)
+    } else if (predict_zero_tau) {
+      return(zero_tau)
+    } else if (predict_zero_forest) {
+      return(zero_forest)
+    } else if (predict_zero_rfx) {
+      return(zero_rfx_predictions)
     }
   } else {
     result <- list()
@@ -3998,6 +4998,18 @@ predict.bcfmodel <- function(
     } else {
       result[["variance_forest_predictions"]] <- NULL
     }
+    if (predict_zero_mu) {
+      result[["zero_prognostic"]] = zero_prognostic
+    }
+    if (predict_zero_tau) {
+      result[["zero_tau"]] = zero_tau
+    }
+    if (predict_zero_forest) {
+      result[["zero_forest"]] = zero_forest
+    }
+    if (predict_zero_rfx) {
+      result[["zero_rfx_predictions"]] = zero_rfx_predictions
+    }
   }
   return(result)
 }
@@ -4029,6 +5041,15 @@ print.bcfmodel <- function(x, ...) {
   if (x$model_params$sample_tau_0) {
     model_terms <- c(model_terms, "treatment effect intercept model")
   }
+  if (identical(x$model_params$outcome_model$family, "zinb")) {
+    model_terms <- c(model_terms, "zero-part prognostic and treatment effect forests")
+    if (isTRUE(x$model_params$has_zero_rfx)) {
+      model_terms <- c(model_terms, "zero-part random effects")
+    }
+  }
+  if (isTRUE(x$model_params$sample_negbin_dispersion)) {
+    model_terms <- c(model_terms, "negative-binomial dispersion model")
+  }
   if (length(model_terms) > 2) {
     summary_message <- paste0(
       "nashtree::bcf() run with ",
@@ -4053,11 +5074,25 @@ print.bcfmodel <- function(x, ...) {
     summary_message,
     "\n",
     "Outcome was modeled ",
-    ifelse(
-      is_probit,
-      "with a probit link",
-      "as gaussian"
-    )
+    if (identical(x$model_params$outcome_model$family, "zinb")) {
+      paste0(
+        "as zero-inflated negative binomial: a log-link count part (Polya-Gamma augmentation, treatment effect on the log-rate-ratio scale)",
+        ifelse(isTRUE(x$model_params$has_offset), " with an offset", ""),
+        " and a probit zero part",
+        ifelse(isTRUE(x$model_params$has_zero_rfx), " with random effects", "")
+      )
+    } else if (identical(x$model_params$outcome_model$outcome, "count")) {
+      paste0(
+        "as negative binomial with a log link (Polya-Gamma augmentation, treatment effect on the log-rate-ratio scale)",
+        ifelse(isTRUE(x$model_params$has_offset), " and an offset", "")
+      )
+    } else {
+      ifelse(
+        is_probit,
+        "with a probit link",
+        "as gaussian"
+      )
+    }
   )
 
   # Treatment details
@@ -4185,6 +5220,31 @@ summary.bcfmodel <- function(object, ...) {
   tmp <- print(object)
 
   # Summarize any sampled quantities
+
+  # Count outcomes: dispersion and structural-zero probability
+  if (!is.null(object$negbin_dispersion_samples)) {
+    r_samples <- object$negbin_dispersion_samples
+    cat(sprintf(
+      "Summary of negative-binomial dispersion (size r) posterior: \n%d samples, mean = %.3f, standard deviation = %.3f, quantiles:\n",
+      length(r_samples),
+      mean(r_samples),
+      sd(r_samples)
+    ))
+    print(quantile(r_samples, probs = c(0.025, 0.1, 0.25, 0.5, 0.75, 0.9, 0.975)))
+  }
+  if (!is.null(object$zero_hat_train)) {
+    zero_probability_mean <- rowMeans(pnorm(as.matrix(object$zero_hat_train)))
+    cat(sprintf(
+      "Summary of in-sample structural-zero probability (pi) posterior means: \n%d observations, mean = %.3f, standard deviation = %.3f, quantiles:\n",
+      length(zero_probability_mean),
+      mean(zero_probability_mean),
+      sd(zero_probability_mean)
+    ))
+    print(quantile(
+      zero_probability_mean,
+      probs = c(0.025, 0.1, 0.25, 0.5, 0.75, 0.9, 0.975)
+    ))
+  }
 
   # Global error scale
   if (object$model_params$sample_sigma2_global) {
@@ -4470,6 +5530,8 @@ plot.bcfmodel <- function(x, ...) {
 #' - In-sample treatment effect forest predictions: `"tau_hat_train"`
 #' - Test set treatment effect forest predictions: `"tau_hat_test"`
 #' - Treatment effect intercept: `"tau_0"`, `"treatment_intercept"`, `"tau_intercept"`
+#' - Negative-binomial size (dispersion) parameter `r` (count models): `"negbin_dispersion"`, `"dispersion"`
+#' - Zero-part probit indices (zero-inflated count models): `"zero_hat_train"`, `"zero_hat_test"`, `"zero_mu_hat_train"`, `"zero_mu_hat_test"`, `"zero_tau_hat_train"`, `"zero_tau_hat_test"`
 #' - In-sample variance forest predictions: `"sigma2_x_train"`, `"var_x_train"`
 #' - Test set variance forest predictions: `"sigma2_x_test"`, `"var_x_test"`
 #'
@@ -4638,6 +5700,26 @@ extractParameter.bcfmodel <- function(object, term) {
     }
   }
 
+  if (term %in% c("negbin_dispersion", "dispersion")) {
+    if (!is.null(object$negbin_dispersion_samples)) {
+      return(object$negbin_dispersion_samples)
+    } else {
+      stop("This model does not have negative-binomial dispersion samples")
+    }
+  }
+
+  zero_terms <- c(
+    "zero_hat_train", "zero_hat_test", "zero_mu_hat_train", "zero_mu_hat_test",
+    "zero_tau_hat_train", "zero_tau_hat_test"
+  )
+  if (term %in% zero_terms) {
+    if (!is.null(object[[term]])) {
+      return(object[[term]])
+    } else {
+      stop("This model does not have ", term, " (zero-inflated count models only)")
+    }
+  }
+
   stop(paste0("term ", term, " is not a valid BCF model term"))
 }
 
@@ -4761,6 +5843,11 @@ saveBCFModelToJson <- function(object) {
   jsonobj$add_forest(object$forests_tau)
   if (object$model_params$include_variance_forest) {
     jsonobj$add_forest(object$forests_variance)
+  }
+  is_zinb_model <- identical(object$model_params$outcome_model$family, "zinb")
+  if (is_zinb_model) {
+    jsonobj$add_forest(object$forests_zero_mu)
+    jsonobj$add_forest(object$forests_zero_tau)
   }
 
   # Add metadata
@@ -4903,6 +5990,47 @@ saveBCFModelToJson <- function(object) {
       "parameters"
     )
   }
+  if (identical(outcome_model_outcome, "count")) {
+    jsonobj$add_string(
+      "family",
+      object$model_params$outcome_model$family,
+      "outcome_model"
+    )
+    jsonobj$add_boolean("has_offset", isTRUE(object$model_params$has_offset))
+    for (field in c(
+      "negbin_dispersion_prior_shape",
+      "negbin_dispersion_prior_rate",
+      "negbin_dispersion_init",
+      "log_rate_ratio_prior_sd"
+    )) {
+      jsonobj$add_scalar(field, object$model_params[[field]])
+    }
+    jsonobj$add_boolean(
+      "sample_negbin_dispersion",
+      isTRUE(object$model_params$sample_negbin_dispersion)
+    )
+    jsonobj$add_vector(
+      "negbin_dispersion_samples",
+      object$negbin_dispersion_samples,
+      "parameters"
+    )
+    if (is_zinb_model) {
+      for (field in c(
+        "zero_outcome_mean",
+        "zinb_zero_probability_init",
+        "num_trees_zero_mu",
+        "num_trees_zero_tau",
+        "sigma2_leaf_zero_mu",
+        "sigma2_leaf_zero_tau"
+      )) {
+        jsonobj$add_scalar(field, object$model_params[[field]])
+      }
+      jsonobj$add_boolean(
+        "has_zero_rfx",
+        isTRUE(object$model_params$has_zero_rfx)
+      )
+    }
+  }
 
   # Add random effects (if present)
   if (object$model_params$has_rfx) {
@@ -4911,6 +6039,11 @@ saveBCFModelToJson <- function(object) {
       "rfx_unique_group_ids",
       object$rfx_unique_group_ids
     )
+  }
+  # Zero-part random effects (zero-inflated family): the second random
+  # effects container, random_effect_container_1
+  if (isTRUE(object$model_params$has_zero_rfx)) {
+    jsonobj$add_random_effects(object$zero_rfx_samples)
   }
   jsonobj$add_string(
     "rfx_model_spec",
@@ -5204,7 +6337,8 @@ createBCFModelFromJson <- function(json_object) {
   }
   model_params[["outcome_model"]] <- OutcomeModel(
     outcome = outcome_model_outcome,
-    link = outcome_model_link
+    link = outcome_model_link,
+    family = .readOutcomeFamilyFromJson(json_object, outcome_model_outcome)
   )
   if (has_field("rfx_model_spec")) {
     model_params[["rfx_model_spec"]] <- json_object$get_string(
@@ -5218,6 +6352,19 @@ createBCFModelFromJson <- function(json_object) {
         .ver
       ))
     }
+  }
+  if (identical(model_params[["outcome_model"]]$outcome, "count")) {
+    count_fields <- .loadBcfCountFieldsFromJson(
+      list(json_object),
+      model_params,
+      output,
+      combined = FALSE
+    )
+    model_params <- count_fields$model_params
+    output <- count_fields$output
+    model_params[["log_rate_ratio_prior_sd"]] <- json_object$get_scalar(
+      "log_rate_ratio_prior_sd"
+    )
   }
   output[["model_params"]] <- model_params
 
@@ -5592,7 +6739,8 @@ createBCFModelFromCombinedJson <- function(json_object_list) {
   }
   model_params[["outcome_model"]] <- OutcomeModel(
     outcome = outcome_model_outcome,
-    link = outcome_model_link
+    link = outcome_model_link,
+    family = .readOutcomeFamilyFromJson(json_object_default, outcome_model_outcome)
   )
   if (has_field("rfx_model_spec")) {
     model_params[["rfx_model_spec"]] <- json_object_default$get_string(
@@ -5629,6 +6777,19 @@ createBCFModelFromCombinedJson <- function(json_object_list) {
       model_params[["num_samples"]] <- model_params[["num_samples"]] +
         json_object$get_scalar("num_samples")
     }
+  }
+  if (identical(model_params[["outcome_model"]]$outcome, "count")) {
+    count_fields <- .loadBcfCountFieldsFromJson(
+      json_object_list,
+      model_params,
+      output,
+      combined = TRUE
+    )
+    model_params <- count_fields$model_params
+    output <- count_fields$output
+    model_params[["log_rate_ratio_prior_sd"]] <- json_object_default$get_scalar(
+      "log_rate_ratio_prior_sd"
+    )
   }
   output[["model_params"]] <- model_params
 
@@ -6072,7 +7233,8 @@ createBCFModelFromCombinedJsonString <- function(json_string_list) {
   }
   model_params[["outcome_model"]] <- OutcomeModel(
     outcome = outcome_model_outcome,
-    link = outcome_model_link
+    link = outcome_model_link,
+    family = .readOutcomeFamilyFromJson(json_object_default, outcome_model_outcome)
   )
   if (has_field("rfx_model_spec")) {
     model_params[["rfx_model_spec"]] <- json_object_default$get_string(
@@ -6109,6 +7271,19 @@ createBCFModelFromCombinedJsonString <- function(json_string_list) {
       model_params[["num_samples"]] <- model_params[["num_samples"]] +
         json_object$get_scalar("num_samples")
     }
+  }
+  if (identical(model_params[["outcome_model"]]$outcome, "count")) {
+    count_fields <- .loadBcfCountFieldsFromJson(
+      json_object_list,
+      model_params,
+      output,
+      combined = TRUE
+    )
+    model_params <- count_fields$model_params
+    output <- count_fields$output
+    model_params[["log_rate_ratio_prior_sd"]] <- json_object_default$get_scalar(
+      "log_rate_ratio_prior_sd"
+    )
   }
   output[["model_params"]] <- model_params
 
@@ -6274,4 +7449,70 @@ createBCFModelFromCombinedJsonString <- function(json_string_list) {
 
   class(output) <- "bcfmodel"
   return(output)
+}
+
+#' Conditional posterior of the treatment intercept tau_0 in bcf()
+#'
+#' Given the forests, `partial_resid = basis %*% tau_0 + e` with
+#' `e_i ~ N(0, sigma2 / precision_i)` and prior `tau_0 ~ N(0, prior_var I)`, so
+#' `tau_0 | - ~ N(Sigma Z'W r / sigma2, Sigma)` with
+#' `Sigma = (Z'W Z / sigma2 + I / prior_var)^-1` and `W = diag(precision)`.
+#' `precision = NULL` means unit weights and keeps the unweighted arithmetic.
+#'
+#' @param basis Treatment basis matrix (n x p).
+#' @param partial_resid Outcome net of every other mean term (length n).
+#' @param precision Per-row precision weights (1 / variance multiplier), or `NULL`.
+#' @param sigma2 Current global error variance.
+#' @param prior_var Prior variance of each element of tau_0.
+#' @return List with the posterior `mean` (length p) and covariance `cov` (p x p).
+#' @noRd
+bcf_tau_0_posterior <- function(
+  basis,
+  partial_resid,
+  precision,
+  sigma2,
+  prior_var
+) {
+  if (is.null(precision)) {
+    Ztr <- t(basis) %*% as.matrix(partial_resid)
+    ZtZ <- crossprod(basis)
+  } else {
+    Ztr <- t(basis) %*% as.matrix(precision * partial_resid)
+    ZtZ <- crossprod(basis * sqrt(precision))
+  }
+  cov <- solve(ZtZ / sigma2 + diag(ncol(basis)) / prior_var)
+  list(mean = as.numeric(cov %*% Ztr / sigma2), cov = cov)
+}
+
+#' Sufficient statistics of the adaptive-coding update in bcf()
+#'
+#' The coding parameters `b_0`, `b_1` are the coefficients of the regression of
+#' `partial_resid` on `tau_x (1 - Z)` and `tau_x Z`, with errors
+#' `N(0, sigma2 / precision_i)`. Returns the (precision-weighted) sums of
+#' squares `s_tt0`, `s_tt1` and cross products `s_ty0`, `s_ty1` within the
+#' control and treated rows. `precision = NULL` means unit weights and keeps
+#' the unweighted arithmetic.
+#'
+#' @param tau_x Treatment effect per row (`tau_0 + tau(X)` when tau_0 is sampled).
+#' @param partial_resid Outcome net of the prognostic forest (and random effects).
+#' @param Z Binary treatment (length n).
+#' @param precision Per-row precision weights (1 / variance multiplier), or `NULL`.
+#' @return List with `s_tt0`, `s_tt1`, `s_ty0`, `s_ty1`.
+#' @noRd
+bcf_coding_suff_stats <- function(tau_x, partial_resid, Z, precision) {
+  if (is.null(precision)) {
+    list(
+      s_tt0 = sum(tau_x * tau_x * (Z == 0)),
+      s_tt1 = sum(tau_x * tau_x * (Z == 1)),
+      s_ty0 = sum(tau_x * partial_resid * (Z == 0)),
+      s_ty1 = sum(tau_x * partial_resid * (Z == 1))
+    )
+  } else {
+    list(
+      s_tt0 = sum(precision * tau_x^2 * (Z == 0)),
+      s_tt1 = sum(precision * tau_x^2 * (Z == 1)),
+      s_ty0 = sum(precision * tau_x * partial_resid * (Z == 0)),
+      s_ty1 = sum(precision * tau_x * partial_resid * (Z == 1))
+    )
+  }
 }
