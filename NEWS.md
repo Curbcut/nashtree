@@ -1,3 +1,15 @@
+# nashtree 0.4.6.9012
+
+* Ports four small upstream stochtree changes (StochasticTree/stochtree #417,
+  #418, #420, #421): the active-forest initializer now reads the starting value
+  for cloglog forests (before, `init_val` was used uninitialized), the
+  forest-container initializer accepts cloglog forests, two sampler locals are
+  initialized, `Log::Fatal` is `[[noreturn]]`, and an unused variable is gone.
+  Seeded draws are unchanged.
+
+* Adds upstream's exact-posterior test for the MCMC tree sampler
+  (StochasticTree/stochtree #431).
+
 # nashtree 0.4.6.9011
 
 * `bart()` and `bcf()` take `zero_random_effects_params`: a prior for the

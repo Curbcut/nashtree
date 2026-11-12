@@ -354,3 +354,43 @@ inherits. A tight zero prior holds the zero-part effects below 0.01 at every
 chain start while the count part's stay free, and the reverse also holds.
 A half-Cauchy with scale 0.001 holds strong group effects (true SD about 1),
 and with scale 0.1 lets them through, as a heavy tail should.
+
+## Upstream stochtree changes through 2026-10-05 (0.4.6.9012)
+
+Upstream `main` was reviewed on 2026-11-12 up to 737f397c (5 Oct 2026). The
+fork point is upstream 5c09ac77 (22 Jul 2026); the fork shares no git history
+with upstream because its R package is generated with `cran-bootstrap.R`.
+Upstream's 18 commits since then include the four NASH sampler fixes
+(StochasticTree/stochtree #425-#428), which are already here.
+
+Ported, with paths mapped from `include/` to `src/include/`:
+
+- aef52833 (#417): remove an unused variable in `cutpoint_candidates.cpp`.
+- 5c330e4d (#418): `[[noreturn]]` on `Log::Fatal`.
+- b2421090 (#420): `initialize_forest_model_cpp` accepts cloglog forests
+  (leaf model 4), and `initialize_forest_model_active_forest_cpp` reads the
+  starting value for them. Before, `bart()` with a cloglog link used
+  `init_val` uninitialized when it set the active forest's root leaves.
+- 1878b0e8 (#421): `init_val` and `leaf_scale` start at 0.0.
+- be249664 (#431): `tests/testthat/test-mcmc-exact-posterior.R`, unchanged.
+  One tree on four points has an enumerable posterior over leaf counts; a
+  100k-draw chain must match it within one percentage point, with the
+  covariate in ascending and descending order.
+
+The uninitialized cloglog value was harmless in practice on Apple silicon:
+seeded draws from the outcome reference set (Gaussian, weighted, variance
+forest, probit with random effects, cloglog binary and ordinal), twelve more
+cloglog fits (binary and ordinal, root- and GFR-started) and an NB fit are
+bitwise identical before and after.
+
+Not ported:
+
+- The Eigen 3.4.1 to 5.0.1 upgrade (28794fe1, 9ff40f67) and
+  `Eigen::placeholders::all` (9c4dcd49, needed only under Eigen 5). It would
+  replace the vendored linear algebra for no functional gain and puts
+  bitwise-reproducible refits at risk.
+- `.gitmodules`, Python tests, and upstream NEWS and contributor updates,
+  which do not apply to the generated R package.
+- Open upstream PR #419 (`std::lgamma` for `boost::math::lgamma` in
+  `leaf_model.cpp`): unmerged, and it could change the last bits of the
+  variance-forest marginal likelihood.
