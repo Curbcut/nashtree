@@ -16,6 +16,10 @@ int main() {
   auto dir=std::filesystem::temp_directory_path()/"nashtree-native-contract";
   check(std::filesystem::create_directory(dir));auto path=(dir/"test.ntf").string();
   f.save(path);auto g=Forest::load(path);check(g.nodes.size()==5 && g.sample_ids==f.sample_ids);
+#ifndef _WIN32
+  nashtree::sync_path(path);nashtree::sync_path(dir.string());
+  rejects([&]{nashtree::sync_path((dir/"missing").string());});
+#endif
   const double x[]={std::nextafter(0.5,-INFINITY),0.5,std::nextafter(0.5,INFINITY),NAN,-INFINITY,INFINITY};
   nashtree::MatrixView view{x,6,1,1,6,6};std::vector<double> out(18);
   g.predict_fixed(view,{7,2,7},out.data(),out.size());

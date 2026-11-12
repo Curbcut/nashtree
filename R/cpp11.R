@@ -935,3 +935,11 @@ json_load_file_cpp <- function(json_ptr, filename) {
 json_load_string_cpp <- function(json_ptr, json_string) {
   invisible(.Call(`_nashtree_json_load_string_cpp`, json_ptr, json_string))
 }
+
+inference_write_cpp <- function(path, features, original_samples, ids, sample_trees, tree_nodes, nodes, metadata) {
+  invisible(.Call(`_nashtree_inference_write_cpp`, path, features, original_samples, ids, sample_trees, tree_nodes, nodes, metadata))
+}
+
+inference_sync_cpp <- function(path) {
+  invisible(.Call(`_nashtree_inference_sync_cpp`, path))
+}

@@ -6,6 +6,8 @@
 #include <vector>
 
 namespace nashtree {
+// Explicit local-filesystem durability boundary (POSIX files and directories).
+void sync_path(const std::string& path);
 // Native core owns no R objects and performs no RNG or preprocessing operations.
 struct MatrixView {
   const double* data;

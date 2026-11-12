@@ -104,3 +104,6 @@ importFrom(stats,var)
 useDynLib(nashtree, .registration = TRUE)
 
 export(sampleBARTSelectedPosteriorPredictive)
+
+export(ntf_write)
+export(ntf_sync)

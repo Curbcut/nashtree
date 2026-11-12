@@ -345,6 +345,22 @@ extern "C" SEXP _nashtree_inference_mapped_cpp(SEXP ptr, SEXP x, SEXP ids) {
     return cpp11::as_sexp(inference_mapped_cpp(cpp11::as_cpp<cpp11::decay_t<cpp11::external_pointer<nashtree::Forest>>>(ptr), cpp11::as_cpp<cpp11::decay_t<cpp11::doubles_matrix<>>>(x), cpp11::as_cpp<cpp11::decay_t<cpp11::doubles>>(ids)));
   END_CPP11
 }
+// R_inference.cpp
+void inference_write_cpp(std::string path, double features, double original_samples, cpp11::doubles ids, cpp11::doubles sample_trees, cpp11::doubles tree_nodes, cpp11::doubles_matrix<> nodes, std::string metadata);
+extern "C" SEXP _nashtree_inference_write_cpp(SEXP path, SEXP features, SEXP original_samples, SEXP ids, SEXP sample_trees, SEXP tree_nodes, SEXP nodes, SEXP metadata) {
+  BEGIN_CPP11
+    inference_write_cpp(cpp11::as_cpp<cpp11::decay_t<std::string>>(path), cpp11::as_cpp<cpp11::decay_t<double>>(features), cpp11::as_cpp<cpp11::decay_t<double>>(original_samples), cpp11::as_cpp<cpp11::decay_t<cpp11::doubles>>(ids), cpp11::as_cpp<cpp11::decay_t<cpp11::doubles>>(sample_trees), cpp11::as_cpp<cpp11::decay_t<cpp11::doubles>>(tree_nodes), cpp11::as_cpp<cpp11::decay_t<cpp11::doubles_matrix<>>>(nodes), cpp11::as_cpp<cpp11::decay_t<std::string>>(metadata));
+    return R_NilValue;
+  END_CPP11
+}
+// R_inference.cpp
+void inference_sync_cpp(std::string path);
+extern "C" SEXP _nashtree_inference_sync_cpp(SEXP path) {
+  BEGIN_CPP11
+    inference_sync_cpp(cpp11::as_cpp<cpp11::decay_t<std::string>>(path));
+    return R_NilValue;
+  END_CPP11
+}
 // R_random_effects.cpp
 cpp11::external_pointer<StochTree::RandomEffectsContainer> rfx_container_cpp(int num_components, int num_groups);
 extern "C" SEXP _nashtree_rfx_container_cpp(SEXP num_components, SEXP num_groups) {
@@ -1736,6 +1752,8 @@ extern "C" SEXP _nashtree_json_load_string_cpp(SEXP json_ptr, SEXP json_string) 
 
 extern "C" {
 static const R_CallMethodDef CallEntries[] = {
+    {"_nashtree_inference_sync_cpp", (DL_FUNC) &_nashtree_inference_sync_cpp, 1},
+    {"_nashtree_inference_write_cpp", (DL_FUNC) &_nashtree_inference_write_cpp, 8},
     {"_nashtree_active_forest_cpp",                                   (DL_FUNC) &_nashtree_active_forest_cpp,                                    4},
     {"_nashtree_add_numeric_split_tree_value_active_forest_cpp",      (DL_FUNC) &_nashtree_add_numeric_split_tree_value_active_forest_cpp,       7},
     {"_nashtree_add_numeric_split_tree_value_forest_container_cpp",   (DL_FUNC) &_nashtree_add_numeric_split_tree_value_forest_container_cpp,    8},

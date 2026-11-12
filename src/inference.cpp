@@ -8,8 +8,24 @@
 #include <limits>
 #include <stdexcept>
 #include <unordered_set>
+#ifndef _WIN32
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 namespace nashtree {
+void sync_path(const std::string& path) {
+#ifdef _WIN32
+  (void)path;
+  throw std::runtime_error("durable conversion cache requires a supported POSIX filesystem");
+#else
+  const int fd=::open(path.c_str(),O_RDONLY);
+  if(fd<0) throw std::runtime_error("cannot open durability target");
+  const int status=::fsync(fd);
+  const int closed=::close(fd);
+  if(status!=0 || closed!=0) throw std::runtime_error("cannot synchronize durability target");
+#endif
+}
 namespace {
 void require(bool ok, const char* message) {
   if (!ok) throw std::runtime_error(message);
