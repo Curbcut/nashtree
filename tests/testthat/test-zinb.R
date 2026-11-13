@@ -278,9 +278,15 @@ test_that("Negative-binomial draws are bitwise identical to cma-nb (da675755)", 
   )
   source(test_path("fixtures", "make-negbin-reference.R"), local = TRUE)
   current <- negbin_reference_fits()
-  for (name in setdiff(names(ref), c("platform", "generated_from"))) {
+  # Weighted fits pass 1 / w where the reference passed w (observation_weights
+  # became precision weights in 0.4.6.9013). 1 / (1 / w) differs from w in the
+  # last bit, so those fits match to rounding, not bitwise.
+  weighted <- "root_weighted"
+  for (name in setdiff(names(ref), c("platform", "generated_from", weighted))) {
     expect_identical(current[[name]], ref[[name]], label = name)
   }
+  expect_equal(current[[weighted]], ref[[weighted]], tolerance = 1e-10,
+    label = weighted)
   expect_identical(OutcomeModel("count", "log")$family, "negbin")
   expect_identical(
     OutcomeModel("count", "log"),

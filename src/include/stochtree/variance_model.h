@@ -12,6 +12,7 @@
 #include <stochtree/ig_sampler.h>
 #include <stochtree/meta.h>
 
+#include <cmath>
 #include <random>
 
 namespace StochTree {
@@ -34,7 +35,12 @@ class GlobalHomoskedasticVarianceModel {
     return b + (0.5 * sum_sq_resid);
   }
   double PosteriorShape(Eigen::VectorXd& residuals, Eigen::VectorXd& weights, double a, double b) {
-    data_size_t n = residuals.rows();
+    // A row with an infinite variance weight (an observation weight of zero)
+    // carries no information, so it does not count towards the shape either
+    data_size_t n = 0;
+    for (data_size_t i = 0; i < residuals.rows(); i++) {
+      if (std::isfinite(weights(i))) n++;
+    }
     return a + (0.5 * n);
   }
   double PosteriorScale(Eigen::VectorXd& residuals, Eigen::VectorXd& weights, double a, double b) {

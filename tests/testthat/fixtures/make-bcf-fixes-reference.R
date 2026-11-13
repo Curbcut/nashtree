@@ -74,19 +74,22 @@ bcf_fixes_reference_fits <- function() {
     prognostic_forest_params = list(num_trees = 30),
     treatment_effect_forest_params = list(num_trees = 15,
       sample_sigma2_leaf = TRUE)))
+  # Weights are passed as 1 / w: the reference was captured when nashtree read
+  # observation_weights as variance multipliers (0.4.6.9013 made them precision
+  # weights), so 1 / w reproduces its draws.
   out$probit_weighted_intercept_adaptive <- fit(47L, y_train = y_bin[tr],
     general = list(adaptive_coding = TRUE,
       outcome_model = OutcomeModel("binary", "probit")),
-    observation_weights = w)
+    observation_weights = 1 / w)
   out$gaussian_tau_leaf_gfr <- fit(48L,
     tau_params = list(sample_sigma2_leaf = TRUE),
     general = list(keep_gfr = TRUE))
-  out$gaussian_weighted_intercept <- fit(49L, observation_weights = w)
+  out$gaussian_weighted_intercept <- fit(49L, observation_weights = 1 / w)
   out$gaussian_weighted_adaptive <- fit(50L,
     tau_params = list(sample_intercept = FALSE),
-    general = list(adaptive_coding = TRUE), observation_weights = w)
+    general = list(adaptive_coding = TRUE), observation_weights = 1 / w)
   out$gaussian_weighted_intercept_adaptive <- fit(51L,
-    general = list(adaptive_coding = TRUE), observation_weights = w)
+    general = list(adaptive_coding = TRUE), observation_weights = 1 / w)
   out
 }
 

@@ -92,8 +92,10 @@ NULL
 #' @param observation_weights (Optional) Numeric vector of observation weights of length `nrow(X_train)`. Weights are
 #'   applied as `y_i | - ~ N(mu(X_i), sigma^2 / w_i)`, so larger weights increase an observation's influence on the fit.
 #'   All weights must be non-negative. Default: `NULL` (all observations equally weighted). Applied to both the
-#'   prognostic and treatment effect forests. Compatible with Gaussian (continuous/identity) and probit outcome models;
-#'   not compatible with cloglog link functions.
+#'   prognostic and treatment effect forests, the global error variance and any random effects. A zero weight removes
+#'   the observation from the likelihood; the outcome is still standardized over all rows without weights. Compatible
+#'   with Gaussian (continuous/identity) and probit outcome models; not compatible with cloglog link functions.
+#'   Internally the C++ layer stores the variance multipliers `1 / w_i`.
 #' @param num_gfr Number of "warm-start" iterations run using the grow-from-root algorithm (He and Hahn, 2021). Default: 5.
 #' @param num_burnin Number of "burn-in" iterations of the MCMC sampler. Default: 0.
 #' @param num_mcmc Number of "retained" iterations of the MCMC sampler. Default: 100.
@@ -857,6 +859,15 @@ bcf <- function(
         "Results may be unreliable when observation_weights are deployed alongside a variance forest model."
       )
     }
+  }
+
+  # observation_weights are precision weights: y_i ~ N(mu(X_i), sigma^2 / w_i).
+  # The C++ datasets store variance multipliers v_i (the slot a variance
+  # forest scales by exp(s(x)) and a count outcome by 1 / omega), so the
+  # datasets get v_i = 1 / w_i. A zero weight becomes Inf: the row carries no
+  # information.
+  observation_variance_weights <- if (!is.null(observation_weights)) {
+    1 / as.numeric(observation_weights)
   }
 
   # Set the variance forest priors if not set
@@ -1842,7 +1853,7 @@ bcf <- function(
     negbin_base_variance_weights <- if (is.null(observation_weights)) {
       rep(1, length(negbin_y))
     } else {
-      as.numeric(observation_weights)
+      observation_variance_weights
     }
     # Precision weights of the current Polya-Gamma step, used by the tau_0 and
     # adaptive-coding updates
@@ -1991,7 +2002,11 @@ bcf <- function(
     rfx_dataset_train <- createRandomEffectsDataset(
       rfx_group_ids_train,
       rfx_basis_train,
-      if (link_is_log) negbin_base_variance_weights else NULL
+      if (link_is_log) {
+        negbin_base_variance_weights
+      } else {
+        observation_variance_weights
+      }
     )
     rfx_tracker_train <- createRandomEffectsTracker(rfx_group_ids_train)
     rfx_model <- createRandomEffectsModel(
@@ -2129,7 +2144,7 @@ bcf <- function(
   if (!link_is_log) {
     current_precision <- NULL
     if (!is.null(observation_weights) && !link_is_probit) {
-      current_precision <- 1 / as.numeric(observation_weights)
+      current_precision <- 1 / observation_variance_weights
     }
   }
 
@@ -2138,7 +2153,7 @@ bcf <- function(
   forest_dataset_train <- createForestDataset(
     X_train,
     tau_basis_train,
-    if (link_is_log) negbin_base_variance_weights else observation_weights
+    if (link_is_log) negbin_base_variance_weights else observation_variance_weights
   )
   if (has_test) {
     forest_dataset_test <- createForestDataset(X_test, tau_basis_test)

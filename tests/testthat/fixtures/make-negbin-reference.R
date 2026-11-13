@@ -44,8 +44,11 @@ negbin_reference_fits <- function() {
     rate = predict(a, X[te, ], rfx_group_ids = groups[te], offset = offset[te],
       scale = "rate", terms = "y_hat"),
     rfx = a$rfx_preds_train))
+  # Weights are passed as 1 / w: the reference was captured when nashtree read
+  # observation_weights as variance multipliers (0.4.6.9013 made them precision
+  # weights), so 1 / w reproduces its draws.
   b <- bart(X[tr, ], y[tr], X_test = X[te, ], num_gfr = 0, num_burnin = 5,
-    num_mcmc = 8, observation_weights = runif(n, 0.5, 2),
+    num_mcmc = 8, observation_weights = 1 / runif(n, 0.5, 2),
     general_params = list(outcome_model = count_model, random_seed = 22L),
     mean_forest_params = list(num_trees = 20))
   out$root_weighted <- keep(b)
