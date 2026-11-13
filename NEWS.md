@@ -1,3 +1,34 @@
+# nashtree 0.4.6.9013
+
+* `observation_weights` in `bart()` and `bcf()` now behave as documented:
+  precision weights, `y_i ~ N(mu(X_i), sigma^2 / w_i)`, so a larger weight
+  gives a row more influence. Until now the R layer handed `w` to the C++
+  datasets unchanged, and the C++ layer reads that slot as a variance
+  multiplier (the same slot a variance forest scales by `exp(s(x))` and a
+  count outcome by `1 / omega`), so a larger weight gave a row *less*
+  influence and a constant weight `c` divided `sigma^2` by `c`. The R layer
+  now passes `1 / w`. This is upstream stochtree's behaviour too
+  (StochasticTree/stochtree at 737f397c); nothing is reported upstream yet.
+  Callers that passed variances as `observation_weights` must now pass their
+  inverses. Fits without weights are bitwise unchanged.
+* The same convention reaches every place weights enter: Gaussian, probit
+  and count outcomes (count variance weights are now `1 / (w omega)`), BCF's
+  tau_0 and adaptive-coding updates, and the random effects. A Gaussian or
+  probit fit with random effects now passes the weights to its random-effects
+  dataset as well; before, its random effects ignored them.
+* A zero weight becomes an infinite variance multiplier: the row leaves the
+  leaf and random-effects sufficient statistics and the residual sum of
+  squares, and no longer counts towards the shape of the global variance's
+  posterior (`GlobalHomoskedasticVarianceModel::PosteriorShape`, weighted
+  overload, counts rows with a finite variance weight). All-zero weights with
+  `num_gfr = 0` therefore sample the leaf and variance priors. The outcome is
+  still standardized over all rows.
+* The bitwise reference fixtures that carry weights now pass `1 / w`; their
+  draws match the earlier references to rounding (`1 / (1 / w)` differs from
+  `w` in the last bit), and the reference tests compare those entries with a
+  tolerance of `1e-10`. Every unweighted reference entry is still compared
+  bitwise.
+
 # nashtree 0.4.6.9012
 
 * Ports four small upstream stochtree changes (StochasticTree/stochtree #417,

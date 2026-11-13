@@ -394,3 +394,23 @@ Not ported:
 - Open upstream PR #419 (`std::lgamma` for `boost::math::lgamma` in
   `leaf_model.cpp`): unmerged, and it could change the last bits of the
   variance-forest marginal likelihood.
+
+## Observation weights as precision weights (0.4.6.9013)
+
+`bart()` and `bcf()` documented `observation_weights` as precision weights
+(`sigma^2 / w_i`), but handed `w` unchanged to the C++ datasets, whose
+variance-weight slot is a variance multiplier everywhere it is read (leaf and
+random-effects sufficient statistics, the global variance's posterior scale).
+Upstream stochtree (737f397c) has the same mismatch. Found on 12 Nov 2026 when
+NASH6 needed noise-aware row weights; a toy fit with weight 100 on half the
+rows pulled the fit to the other half.
+
+- The R layer converts once after validation (`observation_variance_weights
+  <- 1 / w`) and uses that wherever it builds a forest or random-effects
+  dataset, and for BCF's R-side precision. The C++ convention is unchanged.
+- Gaussian and probit random-effects datasets now receive the weights
+  (count outcomes already passed theirs).
+- `PosteriorShape` (weighted overload) counts only rows with a finite
+  variance weight, so zero-weight rows are absent from the likelihood.
+- Unweighted fits are bitwise unchanged; weighted reference fixtures pass
+  `1 / w` and match their references to rounding.

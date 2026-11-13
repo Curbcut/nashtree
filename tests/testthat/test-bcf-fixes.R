@@ -26,8 +26,15 @@ test_that("bcf() draws match the pre-fix reference except where a fix applies", 
     c(bcf_fixes_unchanged, bcf_fixes_changed),
     setdiff(names(ref), c("platform", "generated_from"))
   )
-  for (name in bcf_fixes_unchanged) {
+  # Weighted fits pass 1 / w where the reference passed w (observation_weights
+  # became precision weights in 0.4.6.9013). 1 / (1 / w) differs from w in the
+  # last bit, so those fits match to rounding, not bitwise.
+  weighted <- "probit_weighted_intercept_adaptive"
+  for (name in setdiff(bcf_fixes_unchanged, weighted)) {
     expect_identical(current[[name]], ref[[name]], label = name)
+  }
+  for (name in weighted) {
+    expect_equal(current[[name]], ref[[name]], tolerance = 1e-10, label = name)
   }
   for (name in bcf_fixes_changed) {
     expect_false(identical(current[[name]], ref[[name]]), label = name)
@@ -204,7 +211,7 @@ test_that("Gaussian tau_0 and coding updates condition on the weighted likelihoo
       num_mcmc = 3, prognostic_forest_params = list(num_trees = 20),
       treatment_effect_forest_params = list(num_trees = 10), ...)
   }
-  rec <- record_tau_0_and_coding(fit(observation_weights = v,
+  rec <- record_tau_0_and_coding(fit(observation_weights = 1 / v,
     general_params = list(random_seed = 5L, adaptive_coding = TRUE)))
   # One tau_0 and one coding update per GFR and MCMC iteration
   expect_length(rec$tau_0, 5)
@@ -232,7 +239,7 @@ test_that("Gaussian tau_0 and coding updates condition on the weighted likelihoo
   expect_true(all(vapply(rec$tau_0, function(x) is.null(x$precision), NA)))
   expect_true(all(vapply(rec$coding, function(x) is.null(x$precision), NA)))
   rec <- record_tau_0_and_coding(suppressWarnings(bcf(X, Z, as.numeric(y > 2),
-    propensity_train = pi_x, observation_weights = v, num_gfr = 1,
+    propensity_train = pi_x, observation_weights = 1 / v, num_gfr = 1,
     num_burnin = 0, num_mcmc = 2,
     general_params = list(random_seed = 5L, adaptive_coding = TRUE,
       outcome_model = OutcomeModel("binary", "probit")),
@@ -245,7 +252,7 @@ test_that("Gaussian tau_0 and coding updates condition on the weighted likelihoo
 test_that("Weighted Gaussian BCF recovers tau_0 under extreme heteroskedasticity", {
   skip_on_cran()
   # A fifth of the rows have 400 times the noise variance, passed as
-  # observation_weights; the true effect is the constant 1. With the
+  # observation_weights 1 / 400; the true effect is the constant 1. With the
   # unweighted tau_0 update the posterior mean of tau_0 was 38.7 here (the
   # weighted forest offsetting it); weighted, it stays near 1.
   set.seed(9494)
@@ -255,7 +262,7 @@ test_that("Weighted Gaussian BCF recovers tau_0 under extreme heteroskedasticity
   Z <- rbinom(n, 1, pi_x)
   v <- ifelse(runif(n) < 0.2, 400, 1)
   y <- 1 + 2 * X[, 2] + Z + rnorm(n, 0, 0.5 * sqrt(v))
-  m <- bcf(X, Z, y, propensity_train = pi_x, observation_weights = v,
+  m <- bcf(X, Z, y, propensity_train = pi_x, observation_weights = 1 / v,
     num_gfr = 5, num_burnin = 50, num_mcmc = 100,
     general_params = list(random_seed = 3L))
   expect_lt(abs(mean(m$tau_0_samples) - 1), 1)

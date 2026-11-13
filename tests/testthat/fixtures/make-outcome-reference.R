@@ -35,7 +35,10 @@ outcome_reference_fits <- function() {
   g <- bart(X, y_gauss, X_test = X_test, num_gfr = 3, num_burnin = 3,
     num_mcmc = 8, general_params = list(random_seed = 1L, num_chains = 2))
   out$gaussian <- keep(g, list(pred = predict(g, X_test, type = "mean")))
-  gw <- bart(X, y_gauss, X_test = X_test, observation_weights = w,
+  # Weights are passed as 1 / w: the reference was captured when nashtree read
+  # observation_weights as variance multipliers (0.4.6.9013 made them precision
+  # weights), so 1 / w reproduces its draws.
+  gw <- bart(X, y_gauss, X_test = X_test, observation_weights = 1 / w,
     num_gfr = 0, num_burnin = 3, num_mcmc = 8,
     general_params = list(random_seed = 2L))
   out$gaussian_weighted <- keep(gw)

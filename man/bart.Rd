@@ -69,8 +69,10 @@ that were not in the training set.}
 \item{observation_weights}{(Optional) Numeric vector of observation weights of length \code{nrow(X_train)}. Weights are
 applied as \code{y_i | - ~ N(mu(X_i), sigma^2 / w_i)}, so larger weights increase an observation's influence on the fit.
 All weights must be non-negative. Default: \code{NULL} (all observations equally weighted). Compatible with Gaussian
-(continuous/identity) and probit outcome models; not compatible with cloglog link functions. Note: these are
-referred to internally in the C++ layer as "variance weights" (\code{var_weights}), since they scale the residual variance.}
+(continuous/identity) and probit outcome models; not compatible with cloglog link functions. The weights apply to
+the mean forest, the global error variance and any random effects. A zero weight removes the observation from the
+likelihood; the outcome is still standardized, and default priors calibrated, over all rows without weights.
+Internally the C++ layer stores the variance multipliers \code{1 / w_i} ("variance weights", \code{var_weights}).}
 
 \item{num_gfr}{Number of "warm-start" iterations run using the grow-from-root algorithm (He and Hahn, 2021). Default: 5.}
 

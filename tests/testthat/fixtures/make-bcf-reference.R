@@ -60,7 +60,7 @@ bcf_reference_fits <- function() {
   out$gaussian_adaptive_root$ppd <- sampleBCFPosteriorPredictive(b, X[te, ],
     Z[te], pi_x[te], num_draws_per_sample = 2)
   cd <- bcf(X[tr, ], dose[tr], y_dose[tr], propensity_train = pi_x[tr],
-    observation_weights = w, num_gfr = 2, num_mcmc = 6,
+    observation_weights = 1 / w, num_gfr = 2, num_mcmc = 6,
     general_params = list(random_seed = 34L),
     prognostic_forest_params = list(num_trees = 30),
     treatment_effect_forest_params = list(num_trees = 15))

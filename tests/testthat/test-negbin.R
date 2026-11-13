@@ -135,9 +135,15 @@ test_that("Gaussian, probit and cloglog draws are bitwise identical to 0ac0e7d0"
   )
   source(test_path("fixtures", "make-outcome-reference.R"), local = TRUE)
   current <- suppressWarnings(outcome_reference_fits())
-  for (name in setdiff(names(ref), c("platform", "generated_from"))) {
+  # Weighted fits pass 1 / w where the reference passed w (observation_weights
+  # became precision weights in 0.4.6.9013). 1 / (1 / w) differs from w in the
+  # last bit, so those fits match to rounding, not bitwise.
+  weighted <- "gaussian_weighted"
+  for (name in setdiff(names(ref), c("platform", "generated_from", weighted))) {
     expect_identical(current[[name]], ref[[name]], label = name)
   }
+  expect_equal(current[[weighted]], ref[[weighted]], tolerance = 1e-10,
+    label = weighted)
 })
 
 test_that("Unweighted random-effects draws are bitwise identical to 0ac0e7d0", {
@@ -320,7 +326,7 @@ test_that("NB sampler warm-starts from a previous model and honours fixed disper
   expect_false(fixed$model_params$sample_negbin_dispersion)
 })
 
-test_that("NB observation weights multiply the Polya-Gamma variance weights", {
+test_that("NB observation weights multiply the Polya-Gamma precision", {
   skip_on_cran()
   d <- small_count_data()
   fit <- function(w) {

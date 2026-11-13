@@ -91,8 +91,10 @@ NULL
 #' @param observation_weights (Optional) Numeric vector of observation weights of length `nrow(X_train)`. Weights are
 #'   applied as `y_i | - ~ N(mu(X_i), sigma^2 / w_i)`, so larger weights increase an observation's influence on the fit.
 #'   All weights must be non-negative. Default: `NULL` (all observations equally weighted). Compatible with Gaussian
-#'   (continuous/identity) and probit outcome models; not compatible with cloglog link functions. Note: these are
-#'   referred to internally in the C++ layer as "variance weights" (`var_weights`), since they scale the residual variance.
+#'   (continuous/identity) and probit outcome models; not compatible with cloglog link functions. The weights apply to
+#'   the mean forest, the global error variance and any random effects. A zero weight removes the observation from the
+#'   likelihood; the outcome is still standardized, and default priors calibrated, over all rows without weights.
+#'   Internally the C++ layer stores the variance multipliers `1 / w_i` ("variance weights", `var_weights`).
 #' @param num_gfr Number of "warm-start" iterations run using the grow-from-root algorithm (He and Hahn, 2021). Default: 5.
 #' @param num_burnin Number of "burn-in" iterations of the MCMC sampler. Default: 0.
 #' @param num_mcmc Number of "retained" iterations of the MCMC sampler. Default: 100.
@@ -980,6 +982,15 @@ bart <- function(
     }
   }
 
+  # observation_weights are precision weights: y_i ~ N(mu(X_i), sigma^2 / w_i).
+  # The C++ datasets store variance multipliers v_i (the slot a variance
+  # forest scales by exp(s(x)) and a count outcome by 1 / omega), so the
+  # datasets get v_i = 1 / w_i. A zero weight becomes Inf: the row carries no
+  # information.
+  observation_variance_weights <- if (!is.null(observation_weights)) {
+    1 / as.numeric(observation_weights)
+  }
+
   # Check covariates are matrix or dataframe
   if ((!is.data.frame(X_train)) && (!is.matrix(X_train))) {
     stop("X_train must be a matrix or dataframe")
@@ -1658,11 +1669,12 @@ bart <- function(
       current_leaf_scale <- sigma2_leaf_init
     }
 
-    # Variance weights: user observation weights (if any) times 1 / omega
+    # Variance weights: 1 / (w * omega), with w the user's observation
+    # weights (if any)
     negbin_base_variance_weights <- if (is.null(observation_weights)) {
       rep(1, length(negbin_y))
     } else {
-      as.numeric(observation_weights)
+      observation_variance_weights
     }
   } else {
     # Only standardize if user requested
@@ -1783,7 +1795,7 @@ bart <- function(
   forest_variance_weights <- if (link_is_log) {
     negbin_base_variance_weights
   } else {
-    observation_weights
+    observation_variance_weights
   }
   if (leaf_regression) {
     forest_dataset_train <- createForestDataset(
@@ -1997,7 +2009,7 @@ bart <- function(
     rfx_dataset_train <- createRandomEffectsDataset(
       rfx_group_ids_train,
       rfx_basis_train,
-      if (link_is_log) negbin_base_variance_weights else NULL
+      forest_variance_weights
     )
     rfx_tracker_train <- createRandomEffectsTracker(rfx_group_ids_train)
     rfx_model <- createRandomEffectsModel(
